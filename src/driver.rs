@@ -62,7 +62,7 @@ pub fn compile(file: &str, src: &str) -> Result<String, Failure> {
     let stdlib = load_stdlib();
     let module = check_with(file, src, &stdlib)?;
     let mut units: Vec<(&str, &typed::Module)> = stdlib.modules.iter().map(|(p, m)| (*p, m)).collect();
-    units.push(("", &module));
+    units.push(("main", &module));
     Ok(codegen::emit_program(&units))
 }
 

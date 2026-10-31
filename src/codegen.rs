@@ -16,8 +16,8 @@ const RESERVED: &[&str] = &[
     "while", "window", "with", "yield",
 ];
 
-/// Собирает программу: рантайм, модули `(префикс, модуль)` по порядку и вызов `main()`.
-/// Пустой префикс — модуль программы.
+/// Собирает программу: рантайм, модули `(префикс, модуль)` по порядку и вызов `main$main()`.
+/// Модуль программы имеет префикс `main`, поэтому её глобалы не затеняют глобалы JS.
 pub fn emit_program(units: &[(&str, &typed::Module)]) -> String {
     let mut out = String::from(RUNTIME);
     for (prefix, module) in units {
@@ -30,18 +30,16 @@ pub fn emit_program(units: &[(&str, &typed::Module)]) -> String {
         }
         out.push_str(&gen.out);
     }
-    out.push_str("main();\n");
+    out.push_str("main$main();\n");
     out
 }
 
+/// JS-имя глобала модуля: `префикс$имя`.
 fn mangle(prefix: &str, name: &str) -> String {
-    if prefix.is_empty() {
-        escape(name)
-    } else {
-        format!("{prefix}${name}")
-    }
+    format!("{prefix}${name}")
 }
 
+/// Экранирует локальное имя, совпадающее с зарезервированным словом JS.
 fn escape(name: &str) -> String {
     if RESERVED.contains(&name) {
         format!("{name}$")

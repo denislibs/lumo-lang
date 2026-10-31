@@ -1,0 +1,7 @@
+// Глобалы программы не затеняют глобалы JS
+@external("parseInt")
+fn parseInt(s: String) -> Int
+
+fn main() {
+  print(int.to_string(parseInt("42") + 1))
+}
