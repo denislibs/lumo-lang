@@ -33,6 +33,11 @@ impl Type {
     pub fn unit() -> Type {
         Type::con("Unit")
     }
+
+    /// Кортеж: `#(a, b)`.
+    pub fn tuple(elems: Vec<Type>) -> Type {
+        Type::Con("#".to_string(), elems)
+    }
 }
 
 /// Полиморфный тип: `vars` квантифицированы.
@@ -68,7 +73,7 @@ fn write_type(ty: &Type, names: &mut HashMap<TVar, String>, out: &mut String) {
         }
         Type::Con(name, args) => {
             out.push_str(name);
-            if !args.is_empty() {
+            if !args.is_empty() || name == "#" {
                 out.push('(');
                 write_list(args, names, out);
                 out.push(')');
@@ -112,5 +117,14 @@ mod tests {
         );
         assert_eq!(display(&t), "fn(a, List(b)) -> a");
         assert_eq!(display(&Type::unit()), "Unit");
+    }
+
+    #[test]
+    fn displays_tuples() {
+        assert_eq!(
+            display(&Type::tuple(vec![Type::int(), Type::string()])),
+            "#(Int, String)"
+        );
+        assert_eq!(display(&Type::tuple(vec![])), "#()");
     }
 }

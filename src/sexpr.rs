@@ -1,6 +1,6 @@
 //! Компактная печать AST для тестов: `(+ 1 (* 2 3))`.
 
-use crate::ast::{Expr, ExprKind, Stmt, TypeExpr};
+use crate::ast::{Expr, ExprKind, Pattern, PatternKind, Stmt, TypeExpr};
 
 pub fn expr(e: &Expr) -> String {
     match &e.kind {
@@ -34,12 +34,20 @@ pub fn expr(e: &Expr) -> String {
             let body: String = stmts.iter().map(|s| format!(" {}", stmt(s))).collect();
             format!("(block{body})")
         }
+        ExprKind::Tuple(items) => {
+            let items: String = items.iter().map(|i| format!(" {}", expr(i))).collect();
+            format!("(tuple{items})")
+        }
     }
 }
 
 fn stmt(s: &Stmt) -> String {
     match s {
-        Stmt::Let { name, value, .. } => format!("(let {name} {})", expr(value)),
+        Stmt::Let {
+            pattern: pat,
+            value,
+            ..
+        } => format!("(let {} {})", pattern(pat), expr(value)),
         Stmt::Expr(e) => expr(e),
     }
 }
@@ -52,9 +60,22 @@ pub fn type_expr(t: &TypeExpr) -> String {
         TypeExpr::Fn { params, ret, .. } => {
             format!("fn({}) -> {}", type_list(params), type_expr(ret))
         }
+        TypeExpr::Tuple { elems, .. } => format!("#({})", type_list(elems)),
     }
 }
 
 fn type_list(ts: &[TypeExpr]) -> String {
     ts.iter().map(type_expr).collect::<Vec<_>>().join(", ")
+}
+
+pub fn pattern(p: &Pattern) -> String {
+    match &p.kind {
+        PatternKind::Wildcard => "_".to_string(),
+        PatternKind::Var(name) => name.clone(),
+        PatternKind::Tuple(items) => format!("#({})", pattern_list(items)),
+    }
+}
+
+fn pattern_list(ps: &[Pattern]) -> String {
+    ps.iter().map(pattern).collect::<Vec<_>>().join(", ")
 }

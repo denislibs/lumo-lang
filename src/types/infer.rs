@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{self, BinOp, Expr, ExprKind, Item, Stmt, TypeExpr, UnOp};
+use crate::ast::{self, BinOp, Expr, ExprKind, Item, Pattern, PatternKind, Stmt, TypeExpr, UnOp};
 use crate::diagnostics::{Diag, Span};
 use crate::typed;
 
@@ -239,6 +239,10 @@ impl Checker {
                 }
             }
             ExprKind::Block(stmts) => self.block(stmts),
+            ExprKind::Tuple(items) => {
+                let tys = items.iter().map(|i| self.infer(i)).collect();
+                Type::tuple(tys)
+            }
         }
     }
 
@@ -248,7 +252,7 @@ impl Checker {
         for stmt in stmts {
             last = match stmt {
                 Stmt::Let {
-                    name, ty, value, ..
+                    pattern, ty, value, ..
                 } => {
                     self.level += 1;
                     let actual = self.infer(value);
@@ -261,9 +265,13 @@ impl Checker {
                         }
                         None => actual,
                     };
+                    let mut binds = Vec::new();
+                    self.bind_pattern(pattern, &bound, &mut binds);
                     self.level -= 1;
-                    let scheme = self.subst.generalize(&bound, self.level);
-                    self.locals.push((name.clone(), scheme));
+                    for (name, t) in binds {
+                        let scheme = self.subst.generalize(&t, self.level);
+                        self.locals.push((name, scheme));
+                    }
                     Type::unit()
                 }
                 Stmt::Expr(e) => self.infer(e),
@@ -409,6 +417,33 @@ impl Checker {
                 let ret = self.convert(ret, vars);
                 Type::Fn(params, Box::new(ret))
             }
+            TypeExpr::Tuple { elems, .. } => {
+                let elems = elems.iter().map(|e| self.convert(e, vars)).collect();
+                Type::tuple(elems)
+            }
+        }
+    }
+
+    /// Проверяет образец против типа значения и собирает связанные имена с их типами.
+    fn bind_pattern(&mut self, p: &Pattern, expected: &Type, binds: &mut Vec<(String, Type)>) {
+        match &p.kind {
+            PatternKind::Wildcard => {}
+            PatternKind::Var(name) => {
+                if binds.iter().any(|(n, _)| n == name) {
+                    self.diags.push(Diag::error(
+                        p.span,
+                        format!("имя `{name}` повторяется в образце"),
+                    ));
+                }
+                binds.push((name.clone(), expected.clone()));
+            }
+            PatternKind::Tuple(items) => {
+                let tys: Vec<Type> = items.iter().map(|_| self.subst.fresh(self.level)).collect();
+                self.expect(p.span, &Type::tuple(tys.clone()), expected);
+                for (item, t) in items.iter().zip(&tys) {
+                    self.bind_pattern(item, t, binds);
+                }
+            }
         }
     }
 
@@ -471,6 +506,22 @@ mod tests {
         assert_eq!(t("\"a\" <> \"b\""), "String");
         assert_eq!(t("1 < 2 && true"), "Bool");
         assert_eq!(t("{}"), "Unit");
+    }
+
+    #[test]
+    fn tuples_and_destructuring() {
+        assert_eq!(t("#(1, \"s\")"), "#(Int, String)");
+        assert_eq!(t("fn(p) {\n let #(a, b) = p\n a\n}"), "fn(#(a, b)) -> a");
+        assert_eq!(
+            t("{\n let #(f, n) = #(fn(x) { x }, 1)\n let s = f(\"s\")\n f(n)\n}"),
+            "Int"
+        );
+        assert_eq!(
+            t("fn(p: #(Int, Bool)) { p }"),
+            "fn(#(Int, Bool)) -> #(Int, Bool)"
+        );
+        assert!(err("{\n let #(a, b) = 1\n a\n}").contains("ожидался Int, а здесь #(a, b)"));
+        assert!(err("{\n let #(a, a) = #(1, 2)\n a\n}").contains("имя `a` повторяется в образце"));
     }
 
     #[test]

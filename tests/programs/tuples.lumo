@@ -1,0 +1,16 @@
+fn swap(p) {
+  let #(a, b) = p
+  #(b, a)
+}
+
+fn main() {
+  let #(x, y) = swap(#(1, "один"))
+  print(x)
+  print(int.to_string(y))
+  let #(_, #(n, m)) = #("вложенный", #(2, 3))
+  print(int.to_string(n * m))
+  let point: #(Int, Int) = #(4, 5)
+  let #(px, py) = point
+  print(int.to_string(px + py))
+  print(if #(1, "a") == #(1, "a") { "равны" } else { "разные" })
+}

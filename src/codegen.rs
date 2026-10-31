@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
-use crate::ast::{BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Stmt, UnOp};
+use crate::ast::{
+    BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Pattern, PatternKind, Stmt, UnOp,
+};
 use crate::typed;
 
 const RUNTIME: &str = include_str!("../runtime/lumo.js");
@@ -141,6 +143,8 @@ struct Gen<'a> {
     scopes: Vec<HashMap<String, String>>,
     /// Сколько раз имя уже связано в текущей функции верхнего уровня.
     used: HashMap<String, u32>,
+    /// Счётчик служебных имён `$t1`, `$t2`, …
+    temps: u32,
     out: String,
 }
 
@@ -152,6 +156,7 @@ impl<'a> Gen<'a> {
             globals,
             scopes: Vec::new(),
             used: HashMap::new(),
+            temps: 0,
             out: String::new(),
         }
     }
@@ -197,6 +202,27 @@ impl<'a> Gen<'a> {
         js
     }
 
+    /// Свежее служебное имя (`$` не встречается в именах Lumo).
+    fn temp(&mut self) -> String {
+        self.temps += 1;
+        format!("$t{}", self.temps)
+    }
+
+    /// `const` для каждого имени из образца `let`; значение вычисляется один раз.
+    fn bind_let(&mut self, pattern: &Pattern, value: String) -> String {
+        if let PatternKind::Var(name) = &pattern.kind {
+            let js = self.bind(name);
+            return format!("const {js} = {value};\n");
+        }
+        let tmp = self.temp();
+        let mut out = format!("const {tmp} = {value};\n");
+        for (name, access) in pattern_accesses(pattern, &tmp) {
+            let js = self.bind(&name);
+            let _ = writeln!(out, "const {js} = {access};");
+        }
+        out
+    }
+
     fn var(&self, name: &str) -> String {
         for scope in self.scopes.iter().rev() {
             if let Some(js) = scope.get(name) {
@@ -219,10 +245,9 @@ impl<'a> Gen<'a> {
                 for (i, s) in stmts.iter().enumerate() {
                     let is_last = i + 1 == stmts.len();
                     match s {
-                        Stmt::Let { name, value, .. } => {
+                        Stmt::Let { pattern, value, .. } => {
                             let v = self.expr(value);
-                            let js = self.bind(name);
-                            let _ = writeln!(out, "const {js} = {v};");
+                            out.push_str(&self.bind_let(pattern, v));
                         }
                         Stmt::Expr(e) if is_last => out.push_str(&self.tail(e)),
                         Stmt::Expr(e) => {
@@ -307,10 +332,33 @@ impl<'a> Gen<'a> {
                 };
                 format!("({c} ? {t} : {other})")
             }
+            ExprKind::Tuple(items) => {
+                let items: Vec<String> = items.iter().map(|i| self.expr(i)).collect();
+                format!("[{}]", items.join(", "))
+            }
             ExprKind::Block(stmts) => match stmts.as_slice() {
                 [Stmt::Expr(only)] => self.expr(only),
                 _ => format!("(() => {{\n{}}})()", self.tail(e)),
             },
+        }
+    }
+}
+
+/// Пары (имя Lumo, JS-путь к значению) для имён, которые связывает образец.
+fn pattern_accesses(p: &Pattern, access: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    collect_accesses(p, access.to_string(), &mut out);
+    out
+}
+
+fn collect_accesses(p: &Pattern, access: String, out: &mut Vec<(String, String)>) {
+    match &p.kind {
+        PatternKind::Wildcard => {}
+        PatternKind::Var(name) => out.push((name.clone(), access)),
+        PatternKind::Tuple(items) => {
+            for (i, item) in items.iter().enumerate() {
+                collect_accesses(item, format!("{access}[{i}]"), out);
+            }
         }
     }
 }

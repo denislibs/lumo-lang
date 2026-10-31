@@ -55,14 +55,19 @@ fn walk<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, out: &mut HashSet<String>) {
                 walk(e, bound, out);
             }
         }
+        ExprKind::Tuple(items) => {
+            for i in items {
+                walk(i, bound, out);
+            }
+        }
         ExprKind::Block(stmts) => {
             let base = bound.len();
             for s in stmts {
                 match s {
                     // имя `let` виден только следующим инструкциям, не собственному значению
-                    Stmt::Let { name, value, .. } => {
+                    Stmt::Let { pattern, value, .. } => {
                         walk(value, bound, out);
-                        bound.push(name.as_str());
+                        bound.extend(pattern.bindings().into_iter().map(|(n, _)| n));
                     }
                     Stmt::Expr(e) => walk(e, bound, out),
                 }
@@ -174,6 +179,15 @@ mod tests {
         assert_eq!(free("{\n let h = 1\n h\n}"), Vec::<String>::new());
         // после выхода из блока имя снова свободно
         assert_eq!(free("{\n {\n let h = 1\n h\n }\n h\n}"), vec!["h"]);
+    }
+
+    #[test]
+    fn let_pattern_binds_names() {
+        let e = parse_expr(lex("{\n let #(f, g) = #(h, 1)\n f(g)\n}").unwrap()).unwrap();
+        let mut names = HashSet::new();
+        referenced_names(&e, &mut names);
+        let names: Vec<_> = names.into_iter().collect();
+        assert_eq!(names, vec!["h".to_string()]);
     }
 
     #[test]

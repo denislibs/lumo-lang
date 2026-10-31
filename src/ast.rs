@@ -62,6 +62,11 @@ pub enum TypeExpr {
         ret: Box<TypeExpr>,
         span: Span,
     },
+    /// `#(Int, String)`
+    Tuple {
+        elems: Vec<TypeExpr>,
+        span: Span,
+    },
 }
 
 impl TypeExpr {
@@ -69,7 +74,8 @@ impl TypeExpr {
         match self {
             TypeExpr::Named { span, .. }
             | TypeExpr::Var { span, .. }
-            | TypeExpr::Fn { span, .. } => *span,
+            | TypeExpr::Fn { span, .. }
+            | TypeExpr::Tuple { span, .. } => *span,
         }
     }
 }
@@ -116,12 +122,14 @@ pub enum ExprKind {
     },
     /// Значение блока — последнее выражение; пустой блок или `let` в конце дают `Unit`.
     Block(Vec<Stmt>),
+    /// `#(a, b)`
+    Tuple(Vec<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     Let {
-        name: String,
+        pattern: Pattern,
         ty: Option<TypeExpr>,
         value: Expr,
         span: Span,
@@ -198,6 +206,42 @@ impl UnOp {
             UnOp::Neg => "-",
             UnOp::NegF => "-.",
             UnOp::Not => "!",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pattern {
+    pub kind: PatternKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PatternKind {
+    /// `_`
+    Wildcard,
+    Var(String),
+    /// `#(a, b)`
+    Tuple(Vec<Pattern>),
+}
+
+impl Pattern {
+    /// Имена, которые связывает образец, слева направо.
+    pub fn bindings(&self) -> Vec<(&str, Span)> {
+        let mut out = Vec::new();
+        self.collect_bindings(&mut out);
+        out
+    }
+
+    fn collect_bindings<'a>(&'a self, out: &mut Vec<(&'a str, Span)>) {
+        match &self.kind {
+            PatternKind::Wildcard => {}
+            PatternKind::Var(name) => out.push((name, self.span)),
+            PatternKind::Tuple(items) => {
+                for p in items {
+                    p.collect_bindings(out);
+                }
+            }
         }
     }
 }

@@ -1,5 +1,6 @@
 use crate::ast::{
-    BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Module, Param, Stmt, TypeExpr, UnOp,
+    BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Module, Param, Pattern, PatternKind, Stmt,
+    TypeExpr, UnOp,
 };
 use crate::diagnostics::{Diag, Span};
 use crate::lexer::{Tok, Token};
@@ -259,6 +260,21 @@ impl Parser {
                     span,
                 })
             }
+            Tok::Hash => {
+                self.expect(&Tok::LParen, "(")?;
+                let mut elems = Vec::new();
+                while !self.at(&Tok::RParen) {
+                    elems.push(self.type_expr()?);
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                let end = self.expect(&Tok::RParen, ")")?;
+                Ok(TypeExpr::Tuple {
+                    elems,
+                    span: t.span.to(end),
+                })
+            }
             _ => Err(Diag::error(t.span, "ожидался тип")),
         }
     }
@@ -288,7 +304,7 @@ impl Parser {
             return Ok(Stmt::Expr(self.expr()?));
         }
         let start = self.advance().span;
-        let (name, _) = self.ident()?;
+        let pattern = self.pattern()?;
         let ty = if self.eat(&Tok::Colon) {
             Some(self.type_expr()?)
         } else {
@@ -298,7 +314,7 @@ impl Parser {
         let value = self.expr()?;
         let span = start.to(value.span);
         Ok(Stmt::Let {
-            name,
+            pattern,
             ty,
             value,
             span,
@@ -414,9 +430,58 @@ impl Parser {
             }
             Tok::If => return self.if_expr(t.span),
             Tok::Fn => return self.lambda(t.span),
+            Tok::Hash => return self.tuple(t.span),
             _ => return Err(Diag::error(t.span, "ожидалось выражение")),
         };
         Ok(Expr { kind, span: t.span })
+    }
+
+    /// `#(a, b)` — после `#`.
+    fn tuple(&mut self, start: Span) -> PResult<Expr> {
+        self.expect(&Tok::LParen, "(")?;
+        let mut items = Vec::new();
+        while !self.at(&Tok::RParen) {
+            items.push(self.expr()?);
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        let end = self.expect(&Tok::RParen, ")")?;
+        Ok(Expr {
+            kind: ExprKind::Tuple(items),
+            span: start.to(end),
+        })
+    }
+
+    fn pattern(&mut self) -> PResult<Pattern> {
+        let t = self.advance();
+        let kind = match t.tok {
+            Tok::Ident(name) if name == "_" => PatternKind::Wildcard,
+            Tok::Ident(name) => PatternKind::Var(name),
+            Tok::Hash => {
+                self.expect(&Tok::LParen, "(")?;
+                let items = self.pattern_list(&Tok::RParen)?;
+                let end = self.expect(&Tok::RParen, ")")?;
+                return Ok(Pattern {
+                    kind: PatternKind::Tuple(items),
+                    span: t.span.to(end),
+                });
+            }
+            _ => return Err(Diag::error(t.span, "ожидался образец")),
+        };
+        Ok(Pattern { kind, span: t.span })
+    }
+
+    /// Образцы через запятую до `close` (сам `close` не съедается).
+    fn pattern_list(&mut self, close: &Tok) -> PResult<Vec<Pattern>> {
+        let mut items = Vec::new();
+        while !self.at(close) {
+            items.push(self.pattern()?);
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        Ok(items)
     }
 
     fn if_expr(&mut self, start: Span) -> PResult<Expr> {
@@ -669,5 +734,29 @@ mod tests {
     fn recovery_keeps_boundary_after_consumed_newline() {
         let errs = module_errs("fn a() { if\nfn b() { ) }");
         assert_eq!(errs.len(), 2, "{errs:?}");
+    }
+
+    #[test]
+    fn tuples_and_let_patterns() {
+        assert_eq!(p("#(1, x)"), "(tuple 1 x)");
+        assert_eq!(p("#()"), "(tuple)");
+        assert_eq!(p("{\n let #(a, _) = t\n a\n}"), "(block (let #(a, _) t) a)");
+        assert_eq!(
+            p("{\n let #(a, #(b, c)) = t\n b\n}"),
+            "(block (let #(a, #(b, c)) t) b)"
+        );
+        assert!(perr("{\n let + = x\n x\n}").contains("ожидался образец"));
+    }
+
+    #[test]
+    fn tuple_types() {
+        let m = module("fn f(p: #(Int, fn(a) -> b)) { p }");
+        let Item::Fn(f) = &m.items[0] else {
+            panic!("ожидалась функция")
+        };
+        assert_eq!(
+            sexpr::type_expr(f.params[0].ty.as_ref().unwrap()),
+            "#(Int, fn(a) -> b)"
+        );
     }
 }
