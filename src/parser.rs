@@ -1,4 +1,4 @@
-use crate::ast::{BinOp, Expr, ExprKind, Param, Stmt, TypeExpr, UnOp};
+use crate::ast::{BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Module, Param, Stmt, TypeExpr, UnOp};
 use crate::diagnostics::{Diag, Span};
 use crate::lexer::{Tok, Token};
 
@@ -19,16 +19,97 @@ pub fn parse_expr(tokens: Vec<Token>) -> Result<Expr, Vec<Diag>> {
     result.map_err(|d| vec![d])
 }
 
+/// Разбирает файл. Ошибки собираются по всем объявлениям.
+pub fn parse(tokens: Vec<Token>) -> Result<Module, Vec<Diag>> {
+    let mut p = Parser::new(tokens);
+    let module = p.module();
+    if p.diags.is_empty() {
+        Ok(module)
+    } else {
+        Err(p.diags)
+    }
+}
+
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
-    #[allow(dead_code)] // используется в Task 5
     diags: Vec<Diag>,
 }
 
 impl Parser {
     fn new(toks: Vec<Token>) -> Self {
         Parser { toks, pos: 0, diags: Vec::new() }
+    }
+
+    fn module(&mut self) -> Module {
+        let mut items = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.at(&Tok::Eof) {
+                break;
+            }
+            match self.item() {
+                Ok(item) => items.push(item),
+                Err(d) => {
+                    self.diags.push(d);
+                    self.synchronize();
+                }
+            }
+        }
+        Module { items }
+    }
+
+    /// Пропускает токены до начала следующего объявления на новой строке.
+    fn synchronize(&mut self) {
+        while !self.at(&Tok::Eof) {
+            let after_newline = self.pos > 0 && self.toks[self.pos - 1].tok == Tok::Newline;
+            if after_newline && matches!(self.peek(), Tok::Fn | Tok::At | Tok::Type) {
+                return;
+            }
+            self.advance();
+        }
+    }
+
+    fn item(&mut self) -> PResult<Item> {
+        match self.peek() {
+            Tok::Fn => Ok(Item::Fn(self.fn_decl()?)),
+            Tok::At => Ok(Item::External(self.external()?)),
+            _ => Err(Diag::error(self.span(), "ожидалось объявление: fn или @external")),
+        }
+    }
+
+    fn fn_decl(&mut self) -> PResult<FnDecl> {
+        let start = self.expect(&Tok::Fn, "fn")?;
+        let (name, _) = self.ident()?;
+        let params = self.params()?;
+        let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
+        let body = self.block()?;
+        Ok(FnDecl { name, params, ret, span: start.to(body.span), body })
+    }
+
+    fn external(&mut self) -> PResult<ExternalDecl> {
+        let start = self.expect(&Tok::At, "@")?;
+        let (attr, attr_span) = self.ident()?;
+        if attr != "external" {
+            return Err(Diag::error(attr_span, format!("неизвестный атрибут @{attr}")));
+        }
+        self.expect(&Tok::LParen, "(")?;
+        let t = self.advance();
+        let Tok::Str(js) = t.tok else {
+            return Err(Diag::error(t.span, "ожидалась строка с JS-выражением"));
+        };
+        self.expect(&Tok::RParen, ")")?;
+        self.skip_newlines();
+        self.expect(&Tok::Fn, "fn")?;
+        let (name, _) = self.ident()?;
+        let params = self.params()?;
+        if let Some(p) = params.iter().find(|p| p.ty.is_none()) {
+            return Err(Diag::error(p.span, "у @external-функции типы параметров обязательны"));
+        }
+        self.expect(&Tok::Arrow, "->")?;
+        let ret = self.type_expr()?;
+        let span = start.to(ret.span());
+        Ok(ExternalDecl { js, name, params, ret, span })
     }
 
     fn peek(&self) -> &Tok {
@@ -398,5 +479,67 @@ mod tests {
         assert!(perr("f(1, 2").contains("ожидалось"));
         assert!(perr("(1 + 2).x").contains("доступ через точку"));
         assert!(perr("1 2").contains("лишний текст"));
+    }
+
+    use crate::ast::{Item, Module};
+
+    fn module(src: &str) -> Module {
+        parse(lex(src).unwrap()).unwrap()
+    }
+
+    fn module_errs(src: &str) -> Vec<Diag> {
+        parse(lex(src).unwrap()).unwrap_err()
+    }
+
+    #[test]
+    fn function_declaration_with_annotations() {
+        let m = module("fn add(a: Int, b) -> Int { a + b }");
+        let Item::Fn(f) = &m.items[0] else { panic!("ожидалась функция") };
+        assert_eq!(f.name, "add");
+        assert_eq!(sexpr::type_expr(f.params[0].ty.as_ref().unwrap()), "Int");
+        assert!(f.params[1].ty.is_none());
+        assert_eq!(sexpr::type_expr(f.ret.as_ref().unwrap()), "Int");
+        assert_eq!(sexpr::expr(&f.body), "(block (+ a b))");
+    }
+
+    #[test]
+    fn function_and_generic_types() {
+        let m = module("fn f(g: fn(a, List(Int)) -> b) { g }");
+        let Item::Fn(f) = &m.items[0] else { panic!("ожидалась функция") };
+        assert_eq!(sexpr::type_expr(f.params[0].ty.as_ref().unwrap()), "fn(a, List(Int)) -> b");
+    }
+
+    #[test]
+    fn external_declaration() {
+        let m = module("@external(\"Math.sqrt\")\nfn sqrt(x: Float) -> Float");
+        let Item::External(e) = &m.items[0] else { panic!("ожидался @external") };
+        assert_eq!(e.js, "Math.sqrt");
+        assert_eq!(e.name, "sqrt");
+        assert_eq!(sexpr::type_expr(&e.ret), "Float");
+    }
+
+    #[test]
+    fn external_requires_types() {
+        let errs = module_errs("@external(\"f\")\nfn f(x) -> Int");
+        assert!(errs[0].message.contains("обязательны"));
+    }
+
+    #[test]
+    fn several_items_with_comments() {
+        let m = module("// модуль\nfn a() { 1 }\n\n\nfn b() {\n  a()\n}\n");
+        let names: Vec<&str> = m.items.iter().map(|i| i.name()).collect();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn recovers_and_reports_all_errors() {
+        let errs = module_errs("fn a() { 1 + }\nfn b() { 2 }\nfn c() { ) }");
+        assert_eq!(errs.len(), 2, "{errs:?}");
+    }
+
+    #[test]
+    fn rejects_unknown_top_level() {
+        let errs = module_errs("let x = 1");
+        assert!(errs[0].message.contains("ожидалось объявление"));
     }
 }
