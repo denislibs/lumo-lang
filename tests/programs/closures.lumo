@@ -1,0 +1,24 @@
+fn compose(f, g) {
+  fn(x) { g(f(x)) }
+}
+
+fn make_adder(n) {
+  fn(x) { x + n }
+}
+
+fn add(a, b) {
+  a + b
+}
+
+fn main() {
+  let add2 = make_adder(2)
+  let twice = compose(add2, add2)
+  print(int.to_string(twice(10)))
+  let id = fn(x) { x }
+  print(id("полиморфизм"))
+  print(int.to_string(id(42)))
+  10
+  |> add(5)
+  |> int.to_string
+  |> print
+}

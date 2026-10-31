@@ -1,0 +1,4 @@
+// Модуль int.
+
+@external("String")
+fn to_string(n: Int) -> String

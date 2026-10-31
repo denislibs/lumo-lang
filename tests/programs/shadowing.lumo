@@ -1,0 +1,13 @@
+fn main() {
+  let x = 1
+  let x = x + 1
+  let f = fn(x) { x * 10 }
+  print(int.to_string(f(x)))
+  let print_twice = fn(s) {
+    print(s)
+    print(s)
+  }
+  print_twice("эхо")
+  let class = "зарезервированное слово JS"
+  print(class)
+}

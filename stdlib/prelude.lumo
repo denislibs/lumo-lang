@@ -1,0 +1,4 @@
+// Функции, доступные без префикса.
+
+@external("$print")
+fn print(s: String) -> Unit

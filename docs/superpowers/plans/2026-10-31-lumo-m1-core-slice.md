@@ -1514,10 +1514,15 @@ pub fn parse(tokens: Vec<Token>) -> Result<Module, Vec<Diag>> {
             if self.at(&Tok::Eof) {
                 break;
             }
+            let start = self.pos;
             match self.item() {
                 Ok(item) => items.push(item),
                 Err(d) => {
                     self.diags.push(d);
+                    // Гарантия прогресса: ошибка на первом же токене (например, `type` в M1).
+                    if self.pos == start {
+                        self.advance();
+                    }
                     self.synchronize();
                 }
             }
@@ -3063,9 +3068,9 @@ git commit -m "feat(driver): stdlib loading and program checking"
 **Interfaces:**
 - Consumes: `typed::Module`, AST, `driver::{load_stdlib, check_with}`.
 - Produces:
-  - `codegen::emit_program(units: &[(&str, &typed::Module)]) -> String` — рантайм + модули + `main();`. Пустой префикс — модуль программы.
+  - `codegen::emit_program(units: &[(&str, &typed::Module)]) -> String` — рантайм + модули + `main$main();`. Модуль программы передаётся с префиксом `main`.
   - `driver::compile(file: &str, src: &str) -> Result<String, Failure>`.
-  - Схема имён в JS: глобал модуля с префиксом `p` → `p$имя`; глобал программы → `имя` (зарезервированные слова JS → `имя$`); локальные — уникальны в пределах функции верхнего уровня (`x`, `x$1`, …) и не совпадают с глобалами программы.
+  - Схема имён в JS: глобал модуля с префиксом `p` → `p$имя`; глобал программы → `main$имя` (так имена программы не затеняют глобалы JS); локальные — уникальны в пределах функции верхнего уровня (`x`, `x$1`, …) и не совпадают с глобалами программы.
   - Рантайм: `$idiv`, `$imod`, `$eq`, `$print`.
 
 - [ ] **Step 1: Golden-тесты (падающие)**
@@ -3332,8 +3337,9 @@ const RESERVED: &[&str] = &[
     "while", "window", "with", "yield",
 ];
 
-/// Собирает программу: рантайм, модули `(префикс, модуль)` по порядку и вызов `main()`.
-/// Пустой префикс — модуль программы.
+/// Собирает программу: рантайм, модули `(префикс, модуль)` по порядку и вызов `main$main()`.
+/// Модуль программы идёт с префиксом `main`, как и модули stdlib — так его имена
+/// не затеняют глобалы JS.
 pub fn emit_program(units: &[(&str, &typed::Module)]) -> String {
     let mut out = String::from(RUNTIME);
     for (prefix, module) in units {
@@ -3346,16 +3352,12 @@ pub fn emit_program(units: &[(&str, &typed::Module)]) -> String {
         }
         out.push_str(&gen.out);
     }
-    out.push_str("main();\n");
+    out.push_str("main$main();\n");
     out
 }
 
 fn mangle(prefix: &str, name: &str) -> String {
-    if prefix.is_empty() {
-        escape(name)
-    } else {
-        format!("{prefix}${name}")
-    }
+    format!("{prefix}${name}")
 }
 
 fn escape(name: &str) -> String {
@@ -3568,7 +3570,7 @@ pub fn compile(file: &str, src: &str) -> Result<String, Failure> {
     let stdlib = load_stdlib();
     let module = check_with(file, src, &stdlib)?;
     let mut units: Vec<(&str, &typed::Module)> = stdlib.modules.iter().map(|(p, m)| (*p, m)).collect();
-    units.push(("", &module));
+    units.push(("main", &module));
     Ok(codegen::emit_program(&units))
 }
 ```
@@ -3642,7 +3644,7 @@ fn build_writes_javascript() {
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(fs::read_to_string(&js).unwrap().contains("function main()"));
+    assert!(fs::read_to_string(&js).unwrap().contains("function main$main()"));
 }
 
 #[test]
@@ -3792,3 +3794,20 @@ git commit -m "feat(cli): lumo check, build and run"
 - `lumo run tests/programs/fib.lumo` печатает `6765`.
 - Ошибка типов в программе печатается с подсветкой строки и подсказкой (`для Float используй +.`).
 - Следующий шаг — план M2 (ADT, списки, `match`, проверка полноты, хвостовая рекурсия).
+
+---
+
+## Итоги выполнения M1 (2026-10-31)
+
+Выполнено на ветке `feat/m1-core-slice`: 12 задач, каждая с ревью; финальное ревью всей ветки + волна исправлений F1–F10 (затенение в графе зависимостей, детерминированный порядок ошибок, безопасный временный файл в `lumo run`, защита входа в `build`, проверка кода возврата в golden-тестах, `f == f` — ошибка, повторяющиеся параметры, `let` с аннотацией без каскада ошибок, большой стек компилятора, clippy/fmt).
+
+Согласованные отклонения от текста плана (план выше уже исправлен):
+- восстановление парсера сдвигается на токен, если ошибка не продвинула разбор (иначе зависание на `type`);
+- глобалы программы в JS получают префикс `main$` (иначе `@external("parseInt") fn parseInt` уходил в бесконечную рекурсию).
+
+### Заметки для M2
+
+- **Хвостовая рекурсия:** считать вызов самовызовом, только если имя разрешается в глобал функции (`Gen::var(name) == mangle(prefix, fname)`) — локальная переменная может затенить имя функции. При переходе к `while (true)` замыкания внутри тела захватят переприсваиваемые параметры по ссылке — копировать параметры в `const` в начале каждой итерации.
+- **Пространство имён типов:** `convert` жёстко знает встроенные типы; для `type`/конструкторов добавить в `Env` пространства типов и конструкторов.
+- **`$eq` на длинных списках** рекурсивен — для списков итерировать по хвостам.
+- **Отложено из ревью:** аннотация возвращаемого типа у лямбд (`fn(x: Int) -> Int { … }`); незакрытая `(`/`[` проглатывает остаток файла при восстановлении; у меток ошибок нет подписи/подчёркивания (M3); нет модульных тестов codegen и golden-тестов на IIFE-блоки, `if` без `else`, экранирование строк; `unify` без отката; stdlib перезагружается на каждый `check` (важно для REPL в M4); префикс `"main"` захардкожен в двух местах.
