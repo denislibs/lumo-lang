@@ -29,6 +29,14 @@ fn shadowed(n) {
   shadowed(n)
 }
 
+fn gcd(a, b) {
+  if b == 0 { a } else { gcd(b, a % b) }
+}
+
+fn apply(apply, x) {
+  apply(x)
+}
+
 fn main() {
   print(int.to_string(count(1000000, 0)))
   let big = build(200000, [])
@@ -36,4 +44,6 @@ fn main() {
   print(if big == build(200000, []) { "длинные списки равны" } else { "разные" })
   debug(call_all(closures(3, []), []))
   print(int.to_string(shadowed(21)))
+  print(int.to_string(gcd(1071, 462)))
+  print(int.to_string(apply(fn(n) { n + 1 }, 41)))
 }

@@ -588,5 +588,10 @@ mod tests {
         assert!(!out.contains("while (true)"), "{out}");
         let out = js("fn g(n) {\n  let h = fn() { g(n) }\n  h()\n}\nfn main() { 1 }");
         assert!(!out.contains("while (true)"), "{out}");
+        // самовызов в `let` внутри match (IIFE) — не хвостовой
+        let out = js(
+            "fn f(n) {\n  let x = match n {\n    0 -> 0\n    _ -> f(n - 1)\n  }\n  x\n}\nfn main() { f(3) }",
+        );
+        assert!(!out.contains("while (true)"), "{out}");
     }
 }
