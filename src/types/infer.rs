@@ -304,8 +304,9 @@ impl Checker {
                 if !pattern_errors {
                     let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
                     if let Some(case) = missing_case(&pats, &self.env) {
+                        // подсвечиваем только `match <выражение>`, а не весь многострочный блок
                         self.diags.push(Diag::error(
-                            e.span,
+                            Span::new(e.span.start, scrutinee.span.end),
                             format!("неполный match: не обработан случай `{case}`"),
                         ));
                     }

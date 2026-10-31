@@ -139,5 +139,7 @@ fn check_reports_non_exhaustive_match() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("не обработан случай `false`"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("не обработан случай `false`"));
+    assert!(stderr.contains("match n > 1"), "{stderr}");
 }
