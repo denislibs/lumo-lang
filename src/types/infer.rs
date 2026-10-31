@@ -101,7 +101,17 @@ impl Checker {
         }
     }
 
+    /// Параметр с повторяющимся именем — ошибка (иначе победил бы последний).
+    fn check_duplicate_params(&mut self, params: &[ast::Param]) {
+        for (i, p) in params.iter().enumerate() {
+            if params[..i].iter().any(|q| q.name == p.name) {
+                self.diags.push(Diag::error(p.span, format!("параметр `{}` объявлен дважды", p.name)));
+            }
+        }
+    }
+
     fn external(&mut self, e: &ast::ExternalDecl) -> Scheme {
+        self.check_duplicate_params(&e.params);
         self.level = 1;
         let mut vars = HashMap::new();
         let params: Vec<Type> = e
@@ -118,6 +128,7 @@ impl Checker {
         self.level = 1;
         let mut sigs = Vec::new();
         for f in group {
+            self.check_duplicate_params(&f.params);
             let mut vars = HashMap::new();
             let params: Vec<Type> = f
                 .params
@@ -166,6 +177,7 @@ impl Checker {
             ExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs),
             ExprKind::Call { callee, args } => self.call(callee, args, e.span),
             ExprKind::Lambda { params, body } => {
+                self.check_duplicate_params(params);
                 let base = self.locals.len();
                 let mut vars = HashMap::new();
                 let tys: Vec<Type> = params
@@ -582,6 +594,22 @@ mod tests {
             let fns: Vec<usize> = starts.iter().map(|&s| src[..s].matches("fn ").count()).collect();
             assert_eq!(fns, vec![1, 2, 3, 4]);
         }
+    }
+
+    #[test]
+    fn duplicate_params_are_rejected() {
+        let errs = check_src("fn f(x, x) { x }", &Env::default()).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("параметр `x` объявлен дважды"));
+        let errs = check_src(
+            "@external(\"(a, b) => a\")\nfn e(a: Int, a: Int) -> Int",
+            &Env::default(),
+        )
+        .unwrap_err();
+        assert!(errs[0].message.contains("параметр `a` объявлен дважды"));
+        assert!(err("fn(y, z, y) { y }").contains("параметр `y` объявлен дважды"));
+        // разные имена и одинаковое имя в разных функциях — нормально
+        assert!(check_src("fn f(x, y) { x }\nfn g(x) { x }", &Env::default()).is_ok());
     }
 
     #[test]
