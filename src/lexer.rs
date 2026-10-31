@@ -70,7 +70,56 @@ pub struct Token {
 
 /// Текст → токены. Последний токен — `Eof`.
 pub fn lex(src: &str) -> Result<Vec<Token>, Vec<Diag>> {
-    scan(src)
+    scan(src).map(layout)
+}
+
+/// Оставляет только значимые переводы строк (правила — в описании Task 3 плана M1).
+fn layout(raw: Vec<Token>) -> Vec<Token> {
+    let mut out: Vec<Token> = Vec::new();
+    let mut open: Vec<Tok> = Vec::new();
+    for (idx, t) in raw.iter().enumerate() {
+        match t.tok {
+            Tok::LParen | Tok::LBracket | Tok::LBrace => open.push(t.tok.clone()),
+            Tok::RParen | Tok::RBracket | Tok::RBrace => {
+                open.pop();
+            }
+            _ => {}
+        }
+        if t.tok == Tok::Newline {
+            let in_parens = matches!(open.last(), Some(Tok::LParen) | Some(Tok::LBracket));
+            let prev = out.last().map(|p| &p.tok);
+            let after_continuation = prev.map_or(true, continues_after);
+            let duplicate = prev == Some(&Tok::Newline);
+            let next = raw[idx + 1..].iter().find(|n| n.tok != Tok::Newline);
+            let before_continuation = next.map_or(false, |n| continues_before(&n.tok));
+            if in_parens || after_continuation || duplicate || before_continuation {
+                continue;
+            }
+        }
+        out.push(t.clone());
+    }
+    out
+}
+
+fn continues_after(tok: &Tok) -> bool {
+    use Tok::*;
+    matches!(
+        tok,
+        Plus | Minus | Star | Slash | Percent | PlusDot | MinusDot | StarDot | SlashDot
+            | Lt | Gt | Le | Ge | LtDot | GtDot | LeDot | GeDot | EqEq | NotEq | AndAnd
+            | OrOr | Pipe | Concat | Comma | Arrow | Eq | Dot | Colon | LParen | LBracket
+            | LBrace
+    )
+}
+
+fn continues_before(tok: &Tok) -> bool {
+    use Tok::*;
+    matches!(
+        tok,
+        Pipe | Plus | Star | Slash | Percent | PlusDot | StarDot | SlashDot | Concat
+            | EqEq | NotEq | AndAnd | OrOr | Gt | Ge | Le | GtDot | GeDot | LeDot | LtDot
+            | Dot | Else
+    )
 }
 
 fn scan(src: &str) -> Result<Vec<Token>, Vec<Diag>> {
@@ -314,5 +363,57 @@ mod tests {
     fn unexpected_char_is_error() {
         let diags = lex("1 $ 2").unwrap_err();
         assert!(diags[0].message.contains("неожиданный символ"));
+    }
+
+    #[test]
+    fn newlines_separate_statements_in_braces() {
+        assert_eq!(
+            kinds("{\n a\n b\n}"),
+            vec![LBrace, ident("a"), Newline, ident("b"), Newline, RBrace, Eof]
+        );
+    }
+
+    #[test]
+    fn leading_pipe_continues_line() {
+        assert_eq!(kinds("x\n|> f\n|> g"), vec![ident("x"), Pipe, ident("f"), Pipe, ident("g"), Eof]);
+    }
+
+    #[test]
+    fn newlines_ignored_inside_parens() {
+        assert_eq!(
+            kinds("f(\n1,\n2\n)"),
+            vec![ident("f"), LParen, Int(1), Comma, Int(2), RParen, Eof]
+        );
+    }
+
+    #[test]
+    fn trailing_operator_continues_line() {
+        assert_eq!(kinds("a +\nb"), vec![ident("a"), Plus, ident("b"), Eof]);
+    }
+
+    #[test]
+    fn else_on_next_line() {
+        assert_eq!(kinds("}\nelse {"), vec![RBrace, Else, LBrace, Eof]);
+    }
+
+    #[test]
+    fn blank_lines_collapse_and_leading_dropped() {
+        assert_eq!(kinds("\n\na\n\n\nb"), vec![ident("a"), Newline, ident("b"), Eof]);
+    }
+
+    #[test]
+    fn minus_does_not_continue() {
+        assert_eq!(kinds("a\n-b"), vec![ident("a"), Newline, Minus, ident("b"), Eof]);
+    }
+
+    #[test]
+    fn braces_inside_parens_are_significant() {
+        assert_eq!(
+            kinds("f(fn() {\na\nb\n})"),
+            vec![
+                ident("f"), LParen, Fn, LParen, RParen, LBrace, ident("a"), Newline,
+                ident("b"), Newline, RBrace, RParen, Eof
+            ]
+        );
     }
 }
