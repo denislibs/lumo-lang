@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, BinOp, Expr, ExprKind, Item, Pattern, PatternKind, Stmt, TypeExpr, UnOp};
 use crate::diagnostics::{Diag, Span};
+use crate::exhaust::missing_case;
 use crate::typed;
 
 use super::deps::{free_names, scc};
@@ -285,16 +286,29 @@ impl Checker {
             ExprKind::Match { scrutinee, arms } => {
                 let s = self.infer(scrutinee);
                 let result = self.subst.fresh(self.level);
+                let mut pattern_errors = false;
                 for arm in arms {
                     let base = self.locals.len();
                     let mut binds = Vec::new();
+                    let before = self.diags.len();
                     self.bind_pattern(&arm.pattern, &s, &mut binds);
+                    pattern_errors |= self.diags.len() > before;
                     for (name, t) in binds {
                         self.locals.push((name, Scheme::mono(t)));
                     }
                     let t = self.infer(&arm.body);
                     self.expect(arm.body.span, &t, &result);
                     self.locals.truncate(base);
+                }
+                // полноту проверяем только для корректно типизированных образцов
+                if !pattern_errors {
+                    let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
+                    if let Some(case) = missing_case(&pats, &self.env) {
+                        self.diags.push(Diag::error(
+                            e.span,
+                            format!("неполный match: не обработан случай `{case}`"),
+                        ));
+                    }
                 }
                 result
             }
@@ -321,7 +335,21 @@ impl Checker {
                         None => actual,
                     };
                     let mut binds = Vec::new();
+                    let before = self.diags.len();
                     self.bind_pattern(pattern, &bound, &mut binds);
+                    if self.diags.len() == before {
+                        if let Some(case) = missing_case(&[pattern], &self.env) {
+                            self.diags.push(
+                                Diag::error(
+                                    pattern.span,
+                                    format!(
+                                        "образец в let должен подходить под любое значение; не подходит `{case}`"
+                                    ),
+                                )
+                                .with_hint("для разбора вариантов используй match"),
+                            );
+                        }
+                    }
                     self.level -= 1;
                     for (name, t) in binds {
                         let scheme = self.subst.generalize(&t, self.level);
@@ -1057,5 +1085,29 @@ mod tests {
         );
         assert!(err("match 1 {\n 1 -> \"a\"\n _ -> 2\n}").contains("ожидался String, а здесь Int"));
         assert!(err("match 1 {\n \"s\" -> 1\n _ -> 2\n}").contains("ожидался Int, а здесь String"));
+    }
+
+    #[test]
+    fn exhaustiveness_errors() {
+        let e = |src: &str| check_src(src, &Env::default()).unwrap_err()[0].clone();
+        let d = e(&format!(
+            "{OPTION}fn f(o) {{\n  match o {{\n    Some(x) -> x\n  }}\n}}"
+        ));
+        assert!(
+            d.message
+                .contains("неполный match: не обработан случай `None`"),
+            "{d:?}"
+        );
+        let d = e("fn f(b) {\n  match b {\n    true -> 1\n  }\n}");
+        assert!(d.message.contains("`false`"));
+        let d = e(&format!("{OPTION}fn f(o) {{\n  let Some(x) = o\n  x\n}}"));
+        assert!(d
+            .message
+            .contains("образец в let должен подходить под любое значение"));
+        assert_eq!(
+            d.hint.as_deref(),
+            Some("для разбора вариантов используй match")
+        );
+        assert!(check_src("fn f(p) {\n  let #(a, _) = p\n  a\n}", &Env::default()).is_ok());
     }
 }

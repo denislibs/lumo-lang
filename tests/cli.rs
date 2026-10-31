@@ -127,3 +127,17 @@ fn comparing_lists_of_functions_fails_at_runtime() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("функции нельзя сравнивать"));
 }
+
+#[test]
+fn check_reports_non_exhaustive_match() {
+    let file = write_tmp(
+        "partial.lumo",
+        "fn main() {\n  let n = 2\n  match n > 1 {\n    true -> print(\"да\")\n  }\n}\n",
+    );
+    let out = lumo()
+        .args(["check", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("не обработан случай `false`"));
+}
