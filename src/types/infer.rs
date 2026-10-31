@@ -53,7 +53,11 @@ pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec
         .map(|f| {
             let mut names = HashSet::new();
             free_names(&f.params, &f.body, &mut names);
-            names.iter().filter_map(|n| index.get(n.as_str()).copied()).collect()
+            // HashSet перебирается в случайном порядке — сортируем для детерминизма
+            let mut deps: Vec<usize> = names.iter().filter_map(|n| index.get(n.as_str()).copied()).collect();
+            deps.sort_unstable();
+            deps.dedup();
+            deps
         })
         .collect();
     for group in scc(&edges) {
@@ -65,6 +69,8 @@ pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec
         .iter()
         .map(|i| (i.name().to_string(), c.env.values[i.name()].clone()))
         .collect();
+    // группы проверяются в порядке зависимостей — выдаём ошибки в порядке исходника
+    c.diags.sort_by_key(|d| d.span.start);
     c.finish(typed::Module { ast: module, globals })
 }
 
@@ -556,6 +562,26 @@ mod tests {
         )
         .unwrap_err();
         assert!(errs[0].message.contains("несовпадение типов"));
+    }
+
+    #[test]
+    fn diagnostics_come_in_source_order() {
+        // `a` зависит от `d`, поэтому `d` проверяется раньше всех
+        let src = "fn a() { let x = d()\n 1 + \"a\" }\n\
+                   fn b() { 2 + \"b\" }\n\
+                   fn c() { 3 + \"c\" }\n\
+                   fn d() { 4 + \"d\" }";
+        for _ in 0..20 {
+            let errs = check_src(src, &Env::default()).unwrap_err();
+            let starts: Vec<usize> = errs.iter().map(|d| d.span.start).collect();
+            let mut sorted = starts.clone();
+            sorted.sort_unstable();
+            assert_eq!(errs.len(), 4);
+            assert_eq!(starts, sorted);
+            // номер функции, в которой лежит ошибка
+            let fns: Vec<usize> = starts.iter().map(|&s| src[..s].matches("fn ").count()).collect();
+            assert_eq!(fns, vec![1, 2, 3, 4]);
+        }
     }
 
     #[test]
