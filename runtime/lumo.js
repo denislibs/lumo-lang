@@ -10,10 +10,11 @@ function $imod(a, b) {
 }
 
 function $eq(a, b) {
-  if (a === b) return true;
+  // функции сравниваются с ошибкой всегда, даже `f == f`
   if (typeof a === "function" || typeof b === "function") {
     throw new Error("Lumo: функции нельзя сравнивать через ==");
   }
+  if (a === b) return true;
   if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) {
     return false;
   }

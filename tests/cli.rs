@@ -55,3 +55,34 @@ fn usage_on_bad_arguments() {
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("использование"));
 }
+
+#[test]
+fn build_refuses_to_overwrite_its_input() {
+    let file = write_tmp("same.js", "fn main() {\n  print(\"hi\")\n}\n");
+    let before = fs::read_to_string(&file).unwrap();
+    let out = lumo()
+        .args(["build", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("выходной файл совпадает с входным"));
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+    // то же с явным -o
+    let out = lumo()
+        .args(["build", file.to_str().unwrap(), "-o", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+}
+
+#[test]
+fn comparing_functions_fails_at_runtime() {
+    let file = write_tmp(
+        "fneq.lumo",
+        "fn f(x) { x }\nfn main() {\n  let g = f\n  if g == g { print(\"да\") } else { print(\"нет\") }\n}\n",
+    );
+    let out = lumo().args(["run", file.to_str().unwrap()]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("функции нельзя сравнивать"));
+}
