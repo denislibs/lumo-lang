@@ -221,12 +221,17 @@ impl Checker {
                 Stmt::Let { name, ty, value, .. } => {
                     self.level += 1;
                     let actual = self.infer(value);
-                    if let Some(t) = ty {
-                        let expected = self.convert(t, &mut HashMap::new());
-                        self.expect(value.span, &actual, &expected);
-                    }
+                    // с аннотацией имя получает объявленный тип, чтобы ошибка не тянула за собой новые
+                    let bound = match ty {
+                        Some(t) => {
+                            let expected = self.convert(t, &mut HashMap::new());
+                            self.expect(value.span, &actual, &expected);
+                            expected
+                        }
+                        None => actual,
+                    };
                     self.level -= 1;
-                    let scheme = self.subst.generalize(&actual, self.level);
+                    let scheme = self.subst.generalize(&bound, self.level);
                     self.locals.push((name.clone(), scheme));
                     Type::unit()
                 }
@@ -478,6 +483,13 @@ mod tests {
         assert_eq!(t("fn(x: Int) { x }"), "fn(Int) -> Int");
         assert!(err("fn(x: Strin) { x }").contains("неизвестный тип `Strin`"));
         assert!(err("{\n let x: Int = \"s\"\n x\n}").contains("несовпадение типов"));
+    }
+
+    #[test]
+    fn annotated_let_mismatch_does_not_cascade() {
+        let errs = errs("{\n let x: Int = \"s\"\n x + 1\n}");
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].message.contains("ожидался Int, а здесь String"));
     }
 
     use crate::parser::parse;
