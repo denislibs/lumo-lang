@@ -138,6 +138,18 @@ fn js_op(op: BinOp) -> &'static str {
     }
 }
 
+/// Функция, в которой хвостовой самовызов превращается в переход на новую итерацию цикла.
+struct SelfCall {
+    /// Имя функции в Lumo.
+    name: String,
+    /// Её глобальное JS-имя.
+    js: String,
+    /// Переменные цикла `$p0`, `$p1`, … — по одной на параметр.
+    params: Vec<String>,
+    /// Был ли переписан хотя бы один вызов.
+    used: bool,
+}
+
 struct Gen<'a> {
     prefix: &'a str,
     globals: HashSet<&'a str>,
@@ -149,6 +161,8 @@ struct Gen<'a> {
     used: HashMap<String, u32>,
     /// Счётчик служебных имён `$t1`, `$t2`, …
     temps: u32,
+    /// Текущая функция верхнего уровня; `None` внутри вложенных JS-функций.
+    self_call: Option<SelfCall>,
     out: String,
 }
 
@@ -163,6 +177,7 @@ impl<'a> Gen<'a> {
             scopes: Vec::new(),
             used: HashMap::new(),
             temps: 0,
+            self_call: None,
             out: String::new(),
         }
     }
@@ -171,14 +186,36 @@ impl<'a> Gen<'a> {
         self.used = self.globals.iter().map(|g| (g.to_string(), 1)).collect();
         self.scopes.push(HashMap::new());
         let params: Vec<String> = f.params.iter().map(|p| self.bind(&p.name)).collect();
-        let body = self.tail(&f.body);
-        self.scopes.pop();
         let name = mangle(self.prefix, &f.name);
-        let _ = writeln!(
-            self.out,
-            "function {name}({}) {{\n{body}}}",
-            params.join(", ")
-        );
+        let loop_vars: Vec<String> = (0..params.len()).map(|i| format!("$p{i}")).collect();
+        self.self_call = Some(SelfCall {
+            name: f.name.clone(),
+            js: name.clone(),
+            params: loop_vars.clone(),
+            used: false,
+        });
+        let body = self.tail(&f.body);
+        let looped = self.self_call.take().is_some_and(|s| s.used);
+        self.scopes.pop();
+        if looped {
+            // копии в `const` на каждой итерации: замыкания видят значения своей итерации
+            let copies: String = params
+                .iter()
+                .zip(&loop_vars)
+                .map(|(p, v)| format!("const {p} = {v};\n"))
+                .collect();
+            let _ = writeln!(
+                self.out,
+                "function {name}({}) {{\nwhile (true) {{\n{copies}{body}}}\n}}",
+                loop_vars.join(", ")
+            );
+        } else {
+            let _ = writeln!(
+                self.out,
+                "function {name}({}) {{\n{body}}}",
+                params.join(", ")
+            );
+        }
     }
 
     /// Конструкторы типа: с полями — функция, без полей — общий объект.
@@ -298,6 +335,23 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Хвостовой вызов текущей функции по её глобальному имени (не затенённому локальным).
+    fn is_self_call(&self, callee: &Expr, argc: usize) -> bool {
+        let Some(call) = &self.self_call else {
+            return false;
+        };
+        matches!(&callee.kind, ExprKind::Var(name)
+            if *name == call.name && argc == call.params.len() && self.var(name) == call.js)
+    }
+
+    /// Код во вложенной JS-функции: `continue` внешнего цикла там недоступен.
+    fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = self.self_call.take();
+        let out = f(self);
+        self.self_call = saved;
+        out
+    }
+
     /// Операторы JS, которые вычисляют `e` и делают `return`.
     fn tail(&mut self, e: &Expr) -> String {
         match &e.kind {
@@ -338,6 +392,19 @@ impl<'a> Gen<'a> {
                     }
                     None => format!("if ({c}) {{\n{then}}}\nreturn undefined;\n"),
                 }
+            }
+            ExprKind::Call { callee, args } if self.is_self_call(callee, args.len()) => {
+                let vals: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
+                let call = self.self_call.as_mut().expect("проверено в is_self_call");
+                call.used = true;
+                let mut out: String = call
+                    .params
+                    .iter()
+                    .zip(&vals)
+                    .map(|(p, v)| format!("{p} = {v};\n"))
+                    .collect();
+                out.push_str("continue;\n");
+                out
             }
             ExprKind::Match { scrutinee, arms } => self.match_tail(scrutinee, arms),
             _ => format!("return {};\n", self.expr(e)),
@@ -382,13 +449,13 @@ impl<'a> Gen<'a> {
                 let args: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
                 format!("{f}({})", args.join(", "))
             }
-            ExprKind::Lambda { params, body } => {
-                self.scopes.push(HashMap::new());
-                let ps: Vec<String> = params.iter().map(|p| self.bind(&p.name)).collect();
-                let b = self.tail(body);
-                self.scopes.pop();
+            ExprKind::Lambda { params, body } => self.nested(|g| {
+                g.scopes.push(HashMap::new());
+                let ps: Vec<String> = params.iter().map(|p| g.bind(&p.name)).collect();
+                let b = g.tail(body);
+                g.scopes.pop();
                 format!("(({}) => {{\n{b}}})", ps.join(", "))
-            }
+            }),
             ExprKind::If {
                 cond,
                 then_branch,
@@ -418,10 +485,10 @@ impl<'a> Gen<'a> {
                 let items: Vec<String> = items.iter().map(|i| self.expr(i)).collect();
                 format!("[{}]", items.join(", "))
             }
-            ExprKind::Match { .. } => format!("(() => {{\n{}}})()", self.tail(e)),
+            ExprKind::Match { .. } => self.nested(|g| format!("(() => {{\n{}}})()", g.tail(e))),
             ExprKind::Block(stmts) => match stmts.as_slice() {
                 [Stmt::Expr(only)] => self.expr(only),
-                _ => format!("(() => {{\n{}}})()", self.tail(e)),
+                _ => self.nested(|g| format!("(() => {{\n{}}})()", g.tail(e))),
             },
         }
     }
@@ -496,5 +563,30 @@ fn pattern_conds(p: &Pattern, access: &str, out: &mut Vec<String>) {
                 Some(t) => pattern_conds(t, &cell, out),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    fn js(src: &str) -> String {
+        crate::driver::compile("t.lumo", src).unwrap()
+    }
+
+    #[test]
+    fn tail_self_call_becomes_loop() {
+        let out = js("fn loop_to(n) {\n  if n == 0 { 0 } else { loop_to(n - 1) }\n}\nfn main() { loop_to(3) }");
+        assert!(
+            out.contains("function main$loop_to($p0) {\nwhile (true) {"),
+            "{out}"
+        );
+        assert!(out.contains("continue;"), "{out}");
+    }
+
+    #[test]
+    fn non_tail_or_nested_calls_stay_calls() {
+        let out = js("fn f(n) {\n  if n == 0 { 0 } else { 1 + f(n - 1) }\n}\nfn main() { f(3) }");
+        assert!(!out.contains("while (true)"), "{out}");
+        let out = js("fn g(n) {\n  let h = fn() { g(n) }\n  h()\n}\nfn main() { 1 }");
+        assert!(!out.contains("while (true)"), "{out}");
     }
 }
