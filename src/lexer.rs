@@ -105,9 +105,35 @@ fn continues_after(tok: &Tok) -> bool {
     use Tok::*;
     matches!(
         tok,
-        Plus | Minus | Star | Slash | Percent | PlusDot | MinusDot | StarDot | SlashDot
-            | Lt | Gt | Le | Ge | LtDot | GtDot | LeDot | GeDot | EqEq | NotEq | AndAnd
-            | OrOr | Pipe | Concat | Comma | Arrow | Eq | Dot | Colon | LParen | LBracket
+        Plus | Minus
+            | Star
+            | Slash
+            | Percent
+            | PlusDot
+            | MinusDot
+            | StarDot
+            | SlashDot
+            | Lt
+            | Gt
+            | Le
+            | Ge
+            | LtDot
+            | GtDot
+            | LeDot
+            | GeDot
+            | EqEq
+            | NotEq
+            | AndAnd
+            | OrOr
+            | Pipe
+            | Concat
+            | Comma
+            | Arrow
+            | Eq
+            | Dot
+            | Colon
+            | LParen
+            | LBracket
             | LBrace
     )
 }
@@ -116,9 +142,27 @@ fn continues_before(tok: &Tok) -> bool {
     use Tok::*;
     matches!(
         tok,
-        Pipe | Plus | Star | Slash | Percent | PlusDot | StarDot | SlashDot | Concat
-            | EqEq | NotEq | AndAnd | OrOr | Gt | Ge | Le | GtDot | GeDot | LeDot | LtDot
-            | Dot | Else
+        Pipe | Plus
+            | Star
+            | Slash
+            | Percent
+            | PlusDot
+            | StarDot
+            | SlashDot
+            | Concat
+            | EqEq
+            | NotEq
+            | AndAnd
+            | OrOr
+            | Gt
+            | Ge
+            | Le
+            | GtDot
+            | GeDot
+            | LeDot
+            | LtDot
+            | Dot
+            | Else
     )
 }
 
@@ -133,7 +177,10 @@ fn scan(src: &str) -> Result<Vec<Token>, Vec<Diag>> {
         match c {
             b' ' | b'\t' | b'\r' => i += 1,
             b'\n' => {
-                toks.push(Token { tok: Tok::Newline, span: Span::new(i, i + 1) });
+                toks.push(Token {
+                    tok: Tok::Newline,
+                    span: Span::new(i, i + 1),
+                });
                 i += 1;
             }
             b'/' if bytes.get(i + 1) == Some(&b'/') => {
@@ -152,12 +199,23 @@ fn scan(src: &str) -> Result<Vec<Token>, Vec<Diag>> {
                     while i < bytes.len() && bytes[i].is_ascii_digit() {
                         i += 1;
                     }
-                    let value = src[start..i].parse().expect("цифры с точкой — валидный f64");
-                    toks.push(Token { tok: Tok::Float(value), span: Span::new(start, i) });
+                    let value = src[start..i]
+                        .parse()
+                        .expect("цифры с точкой — валидный f64");
+                    toks.push(Token {
+                        tok: Tok::Float(value),
+                        span: Span::new(start, i),
+                    });
                 } else {
                     match src[start..i].parse::<i64>() {
-                        Ok(n) => toks.push(Token { tok: Tok::Int(n), span: Span::new(start, i) }),
-                        Err(_) => diags.push(Diag::error(Span::new(start, i), "целое число слишком большое")),
+                        Ok(n) => toks.push(Token {
+                            tok: Tok::Int(n),
+                            span: Span::new(start, i),
+                        }),
+                        Err(_) => diags.push(Diag::error(
+                            Span::new(start, i),
+                            "целое число слишком большое",
+                        )),
                     }
                 }
             }
@@ -197,7 +255,10 @@ fn scan(src: &str) -> Result<Vec<Token>, Vec<Diag>> {
                 if !closed {
                     diags.push(Diag::error(Span::new(start, i), "незакрытая строка"));
                 }
-                toks.push(Token { tok: Tok::Str(value), span: Span::new(start, i) });
+                toks.push(Token {
+                    tok: Tok::Str(value),
+                    span: Span::new(start, i),
+                });
             }
             c if c.is_ascii_alphabetic() || c == b'_' => {
                 while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
@@ -216,13 +277,19 @@ fn scan(src: &str) -> Result<Vec<Token>, Vec<Diag>> {
                     _ if c.is_ascii_uppercase() => Tok::Upper(text.to_string()),
                     _ => Tok::Ident(text.to_string()),
                 };
-                toks.push(Token { tok, span: Span::new(start, i) });
+                toks.push(Token {
+                    tok,
+                    span: Span::new(start, i),
+                });
             }
             _ => {
                 let mut matched = false;
                 for len in [3, 2, 1] {
                     if let Some(tok) = src.get(i..i + len).and_then(operator) {
-                        toks.push(Token { tok, span: Span::new(i, i + len) });
+                        toks.push(Token {
+                            tok,
+                            span: Span::new(i, i + len),
+                        });
                         i += len;
                         matched = true;
                         break;
@@ -239,7 +306,10 @@ fn scan(src: &str) -> Result<Vec<Token>, Vec<Diag>> {
             }
         }
     }
-    toks.push(Token { tok: Tok::Eof, span: Span::new(src.len(), src.len()) });
+    toks.push(Token {
+        tok: Tok::Eof,
+        span: Span::new(src.len(), src.len()),
+    });
     if diags.is_empty() {
         Ok(toks)
     } else {
@@ -310,35 +380,67 @@ mod tests {
         assert_eq!(
             kinds("fn add(a, b) { a + b }"),
             vec![
-                Fn, ident("add"), LParen, ident("a"), Comma, ident("b"), RParen,
-                LBrace, ident("a"), Plus, ident("b"), RBrace, Eof
+                Fn,
+                ident("add"),
+                LParen,
+                ident("a"),
+                Comma,
+                ident("b"),
+                RParen,
+                LBrace,
+                ident("a"),
+                Plus,
+                ident("b"),
+                RBrace,
+                Eof
             ]
         );
     }
 
     #[test]
     fn numbers() {
-        assert_eq!(kinds("42 2.5 1..2"), vec![Int(42), Float(2.5), Int(1), DotDot, Int(2), Eof]);
+        assert_eq!(
+            kinds("42 2.5 1..2"),
+            vec![Int(42), Float(2.5), Int(1), DotDot, Int(2), Eof]
+        );
     }
 
     #[test]
     fn operators_longest_match() {
         assert_eq!(
             kinds("+. -> <=. <= <> |> == != && || ! % <. > @ #"),
-            vec![PlusDot, Arrow, LeDot, Le, Concat, Pipe, EqEq, NotEq, AndAnd, OrOr, Bang, Percent, LtDot, Gt, At, Hash, Eof]
+            vec![
+                PlusDot, Arrow, LeDot, Le, Concat, Pipe, EqEq, NotEq, AndAnd, OrOr, Bang, Percent,
+                LtDot, Gt, At, Hash, Eof
+            ]
         );
     }
 
     #[test]
     fn strings_with_escapes_and_unicode() {
-        assert_eq!(kinds(r#""привет\n\"мир\"""#), vec![Str("привет\n\"мир\"".to_string()), Eof]);
+        assert_eq!(
+            kinds(r#""привет\n\"мир\"""#),
+            vec![Str("привет\n\"мир\"".to_string()), Eof]
+        );
     }
 
     #[test]
     fn keywords_and_upper_names() {
         assert_eq!(
             kinds("let x = Some true false if else match type"),
-            vec![Let, ident("x"), Eq, Upper("Some".to_string()), True, False, If, Else, Match, Type, Eof]
+            vec![
+                Let,
+                ident("x"),
+                Eq,
+                Upper("Some".to_string()),
+                True,
+                False,
+                If,
+                Else,
+                Match,
+                Type,
+                Eof
+            ]
         );
     }
 
@@ -369,13 +471,24 @@ mod tests {
     fn newlines_separate_statements_in_braces() {
         assert_eq!(
             kinds("{\n a\n b\n}"),
-            vec![LBrace, ident("a"), Newline, ident("b"), Newline, RBrace, Eof]
+            vec![
+                LBrace,
+                ident("a"),
+                Newline,
+                ident("b"),
+                Newline,
+                RBrace,
+                Eof
+            ]
         );
     }
 
     #[test]
     fn leading_pipe_continues_line() {
-        assert_eq!(kinds("x\n|> f\n|> g"), vec![ident("x"), Pipe, ident("f"), Pipe, ident("g"), Eof]);
+        assert_eq!(
+            kinds("x\n|> f\n|> g"),
+            vec![ident("x"), Pipe, ident("f"), Pipe, ident("g"), Eof]
+        );
     }
 
     #[test]
@@ -398,12 +511,18 @@ mod tests {
 
     #[test]
     fn blank_lines_collapse_and_leading_dropped() {
-        assert_eq!(kinds("\n\na\n\n\nb"), vec![ident("a"), Newline, ident("b"), Eof]);
+        assert_eq!(
+            kinds("\n\na\n\n\nb"),
+            vec![ident("a"), Newline, ident("b"), Eof]
+        );
     }
 
     #[test]
     fn minus_does_not_continue() {
-        assert_eq!(kinds("a\n-b"), vec![ident("a"), Newline, Minus, ident("b"), Eof]);
+        assert_eq!(
+            kinds("a\n-b"),
+            vec![ident("a"), Newline, Minus, ident("b"), Eof]
+        );
     }
 
     #[test]
@@ -411,8 +530,19 @@ mod tests {
         assert_eq!(
             kinds("f(fn() {\na\nb\n})"),
             vec![
-                ident("f"), LParen, Fn, LParen, RParen, LBrace, ident("a"), Newline,
-                ident("b"), Newline, RBrace, RParen, Eof
+                ident("f"),
+                LParen,
+                Fn,
+                LParen,
+                RParen,
+                LBrace,
+                ident("a"),
+                Newline,
+                ident("b"),
+                Newline,
+                RBrace,
+                RParen,
+                Eof
             ]
         );
     }

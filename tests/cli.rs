@@ -17,15 +17,25 @@ fn write_tmp(name: &str, src: &str) -> PathBuf {
 #[test]
 fn run_prints_program_output() {
     let file = write_tmp("ok.lumo", "fn main() {\n  print(\"hi\")\n}\n");
-    let out = lumo().args(["run", file.to_str().unwrap()]).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = lumo()
+        .args(["run", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
 }
 
 #[test]
 fn check_reports_type_errors() {
     let file = write_tmp("bad.lumo", "fn main() {\n  print(1)\n}\n");
-    let out = lumo().args(["check", file.to_str().unwrap()]).output().unwrap();
+    let out = lumo()
+        .args(["check", file.to_str().unwrap()])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("ожидался String, а здесь Int"));
 }
@@ -38,13 +48,22 @@ fn build_writes_javascript() {
         .args(["build", file.to_str().unwrap(), "-o", js.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(fs::read_to_string(&js).unwrap().contains("function main$main()"));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(fs::read_to_string(&js)
+        .unwrap()
+        .contains("function main$main()"));
 }
 
 #[test]
 fn missing_file_is_reported() {
-    let out = lumo().args(["check", "/nonexistent/x.lumo"]).output().unwrap();
+    let out = lumo()
+        .args(["check", "/nonexistent/x.lumo"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("не удалось прочитать"));
 }
@@ -69,7 +88,12 @@ fn build_refuses_to_overwrite_its_input() {
     assert_eq!(fs::read_to_string(&file).unwrap(), before);
     // то же с явным -o
     let out = lumo()
-        .args(["build", file.to_str().unwrap(), "-o", file.to_str().unwrap()])
+        .args([
+            "build",
+            file.to_str().unwrap(),
+            "-o",
+            file.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
@@ -82,7 +106,10 @@ fn comparing_functions_fails_at_runtime() {
         "fneq.lumo",
         "fn f(x) { x }\nfn main() {\n  let g = f\n  if g == g { print(\"да\") } else { print(\"нет\") }\n}\n",
     );
-    let out = lumo().args(["run", file.to_str().unwrap()]).output().unwrap();
+    let out = lumo()
+        .args(["run", file.to_str().unwrap()])
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("функции нельзя сравнивать"));
 }

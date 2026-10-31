@@ -14,7 +14,9 @@ const USAGE: &str = "использование:
 const STACK_SIZE: usize = 64 * 1024 * 1024;
 
 fn main() {
-    let worker = std::thread::Builder::new().stack_size(STACK_SIZE).spawn(real_main);
+    let worker = std::thread::Builder::new()
+        .stack_size(STACK_SIZE)
+        .spawn(real_main);
     let code = match worker.map(|h| h.join()) {
         Ok(Ok(code)) => code,
         Ok(Err(_)) => 101, // паника уже напечатана потоком
@@ -31,7 +33,10 @@ fn real_main() -> i32 {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
         ["check", file] => check(file),
-        ["build", file] => build(file, &Path::new(file).with_extension("js").to_string_lossy()),
+        ["build", file] => build(
+            file,
+            &Path::new(file).with_extension("js").to_string_lossy(),
+        ),
         ["build", file, "-o", out] => build(file, out),
         ["run", file] => run(file),
         _ => {
@@ -126,7 +131,9 @@ fn create_temp_js(dir: &Path, js: &str) -> std::io::Result<PathBuf> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    create_temp_js_named(dir, js, |attempt| format!("lumo-run-{}-{nanos}-{attempt}.js", process::id()))
+    create_temp_js_named(dir, js, |attempt| {
+        format!("lumo-run-{}-{nanos}-{attempt}.js", process::id())
+    })
 }
 
 /// `create_new` (O_EXCL) не открывает существующий путь, в том числе символическую ссылку,
@@ -217,7 +224,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = scratch("mode");
         let path = create_temp_js(&dir, "js").unwrap();
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -30,7 +30,10 @@ pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec
             Item::External(e) => e.span,
         };
         if !seen.insert(item.name()) {
-            c.diags.push(Diag::error(span, format!("`{}` уже объявлено в этом модуле", item.name())));
+            c.diags.push(Diag::error(
+                span,
+                format!("`{}` уже объявлено в этом модуле", item.name()),
+            ));
         }
     }
     for item in &module.items {
@@ -47,14 +50,21 @@ pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec
             Item::External(_) => None,
         })
         .collect();
-    let index: HashMap<&str, usize> = fns.iter().enumerate().map(|(i, f)| (f.name.as_str(), i)).collect();
+    let index: HashMap<&str, usize> = fns
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.name.as_str(), i))
+        .collect();
     let edges: Vec<Vec<usize>> = fns
         .iter()
         .map(|f| {
             let mut names = HashSet::new();
             free_names(&f.params, &f.body, &mut names);
             // HashSet перебирается в случайном порядке — сортируем для детерминизма
-            let mut deps: Vec<usize> = names.iter().filter_map(|n| index.get(n.as_str()).copied()).collect();
+            let mut deps: Vec<usize> = names
+                .iter()
+                .filter_map(|n| index.get(n.as_str()).copied())
+                .collect();
             deps.sort_unstable();
             deps.dedup();
             deps
@@ -71,7 +81,10 @@ pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec
         .collect();
     // группы проверяются в порядке зависимостей — выдаём ошибки в порядке исходника
     c.diags.sort_by_key(|d| d.span.start);
-    c.finish(typed::Module { ast: module, globals })
+    c.finish(typed::Module {
+        ast: module,
+        globals,
+    })
 }
 
 struct Checker {
@@ -105,7 +118,10 @@ impl Checker {
     fn check_duplicate_params(&mut self, params: &[ast::Param]) {
         for (i, p) in params.iter().enumerate() {
             if params[..i].iter().any(|q| q.name == p.name) {
-                self.diags.push(Diag::error(p.span, format!("параметр `{}` объявлен дважды", p.name)));
+                self.diags.push(Diag::error(
+                    p.span,
+                    format!("параметр `{}` объявлен дважды", p.name),
+                ));
             }
         }
     }
@@ -117,7 +133,12 @@ impl Checker {
         let params: Vec<Type> = e
             .params
             .iter()
-            .map(|p| self.convert(p.ty.as_ref().expect("парсер требует типы у @external"), &mut vars))
+            .map(|p| {
+                self.convert(
+                    p.ty.as_ref().expect("парсер требует типы у @external"),
+                    &mut vars,
+                )
+            })
             .collect();
         let ret = self.convert(&e.ret, &mut vars);
         self.level = 0;
@@ -137,7 +158,9 @@ impl Checker {
                 .collect();
             let ret = self.annotation(f.ret.as_ref(), &mut vars);
             let ty = Type::Fn(params.clone(), Box::new(ret.clone()));
-            self.env.values.insert(f.name.clone(), Scheme::mono(ty.clone()));
+            self.env
+                .values
+                .insert(f.name.clone(), Scheme::mono(ty.clone()));
             sigs.push((params, ret, ty));
         }
         for (f, (params, ret, _)) in group.iter().zip(&sigs) {
@@ -191,7 +214,11 @@ impl Checker {
                 self.locals.truncate(base);
                 Type::Fn(tys, Box::new(ret))
             }
-            ExprKind::If { cond, then_branch, else_branch } => {
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 let c = self.infer(cond);
                 self.expect(cond.span, &c, &Type::bool());
                 let then_ty = self.infer(then_branch);
@@ -203,7 +230,9 @@ impl Checker {
                     }
                     None => {
                         if !self.expect(then_branch.span, &then_ty, &Type::unit()) {
-                            self.hint_last("у if без else ветка должна возвращать Unit — добавь else");
+                            self.hint_last(
+                                "у if без else ветка должна возвращать Unit — добавь else",
+                            );
                         }
                         Type::unit()
                     }
@@ -218,7 +247,9 @@ impl Checker {
         let mut last = Type::unit();
         for stmt in stmts {
             last = match stmt {
-                Stmt::Let { name, ty, value, .. } => {
+                Stmt::Let {
+                    name, ty, value, ..
+                } => {
                     self.level += 1;
                     let actual = self.infer(value);
                     // с аннотацией имя получает объявленный тип, чтобы ошибка не тянула за собой новые
@@ -253,7 +284,8 @@ impl Checker {
         match scheme {
             Some(s) => self.subst.instantiate(&s, self.level),
             None => {
-                self.diags.push(Diag::error(span, format!("неизвестное имя `{name}`")));
+                self.diags
+                    .push(Diag::error(span, format!("неизвестное имя `{name}`")));
                 self.subst.fresh(self.level)
             }
         }
@@ -354,11 +386,15 @@ impl Checker {
         match t {
             TypeExpr::Named { name, args, span } => {
                 if !matches!(name.as_str(), "Int" | "Float" | "Bool" | "String" | "Unit") {
-                    self.diags.push(Diag::error(*span, format!("неизвестный тип `{name}`")));
+                    self.diags
+                        .push(Diag::error(*span, format!("неизвестный тип `{name}`")));
                     return self.subst.fresh(self.level);
                 }
                 if !args.is_empty() {
-                    self.diags.push(Diag::error(*span, format!("тип `{name}` не принимает параметров")));
+                    self.diags.push(Diag::error(
+                        *span,
+                        format!("тип `{name}` не принимает параметров"),
+                    ));
                 }
                 Type::con(name)
             }
@@ -446,7 +482,10 @@ mod tests {
 
     #[test]
     fn let_polymorphism() {
-        assert_eq!(t("{\n let id = fn(x) { x }\n let a = id(1)\n id(\"s\")\n}"), "String");
+        assert_eq!(
+            t("{\n let id = fn(x) { x }\n let a = id(1)\n id(\"s\")\n}"),
+            "String"
+        );
     }
 
     #[test]
@@ -603,7 +642,10 @@ mod tests {
             assert_eq!(errs.len(), 4);
             assert_eq!(starts, sorted);
             // номер функции, в которой лежит ошибка
-            let fns: Vec<usize> = starts.iter().map(|&s| src[..s].matches("fn ").count()).collect();
+            let fns: Vec<usize> = starts
+                .iter()
+                .map(|&s| src[..s].matches("fn ").count())
+                .collect();
             assert_eq!(fns, vec![1, 2, 3, 4]);
         }
     }
@@ -628,7 +670,10 @@ mod tests {
     fn module_access() {
         let mut env = Env::default();
         let to_string = Scheme::mono(Type::Fn(vec![Type::int()], Box::new(Type::string())));
-        env.modules.entry("int".to_string()).or_default().insert("to_string".to_string(), to_string);
+        env.modules
+            .entry("int".to_string())
+            .or_default()
+            .insert("to_string".to_string(), to_string);
         let m = check_src("fn f() { int.to_string(1) }", &env).unwrap();
         assert_eq!(sig(&m, "f"), "fn() -> String");
         let errs = check_src("fn f() { int.nope(1) }", &env).unwrap_err();
@@ -640,7 +685,10 @@ mod tests {
     #[test]
     fn module_globals_shadow_env() {
         let mut env = Env::default();
-        env.values.insert("print".to_string(), Scheme::mono(Type::Fn(vec![Type::string()], Box::new(Type::unit()))));
+        env.values.insert(
+            "print".to_string(),
+            Scheme::mono(Type::Fn(vec![Type::string()], Box::new(Type::unit()))),
+        );
         let m = check_src("fn print(x) { x }\nfn f() { print(1) }", &env).unwrap();
         assert_eq!(sig(&m, "f"), "fn() -> Int");
     }

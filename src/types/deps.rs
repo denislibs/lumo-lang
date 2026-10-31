@@ -44,7 +44,11 @@ fn walk<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, out: &mut HashSet<String>) {
             walk(body, bound, out);
             bound.truncate(base);
         }
-        ExprKind::If { cond, then_branch, else_branch } => {
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
             walk(cond, bound, out);
             walk(then_branch, bound, out);
             if let Some(e) = else_branch {
@@ -175,7 +179,11 @@ mod tests {
     #[test]
     fn fn_params_are_bound() {
         let e = parse_expr(lex("f(x)").unwrap()).unwrap();
-        let params = vec![Param { name: "f".into(), ty: None, span: Default::default() }];
+        let params = vec![Param {
+            name: "f".into(),
+            ty: None,
+            span: Default::default(),
+        }];
         let mut names = HashSet::new();
         free_names(&params, &e, &mut names);
         assert_eq!(names.into_iter().collect::<Vec<_>>(), vec!["x"]);
@@ -197,7 +205,10 @@ mod tests {
     #[test]
     fn chain_is_ordered_dependencies_first() {
         // 0 зависит от 1, 1 от 2
-        assert_eq!(scc(&[vec![1], vec![2], vec![]]), vec![vec![2], vec![1], vec![0]]);
+        assert_eq!(
+            scc(&[vec![1], vec![2], vec![]]),
+            vec![vec![2], vec![1], vec![0]]
+        );
     }
 
     #[test]

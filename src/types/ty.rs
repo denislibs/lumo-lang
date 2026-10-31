@@ -44,7 +44,10 @@ pub struct Scheme {
 
 impl Scheme {
     pub fn mono(ty: Type) -> Scheme {
-        Scheme { vars: Vec::new(), ty }
+        Scheme {
+            vars: Vec::new(),
+            ty,
+        }
     }
 }
 

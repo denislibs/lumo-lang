@@ -9,7 +9,11 @@ use crate::types::infer::check_module;
 
 /// (имя модуля, файл, исходник). Порядок важен: модуль видит только предыдущие.
 const STDLIB: &[(&str, &str, &str)] = &[
-    ("prelude", "prelude.lumo", include_str!("../stdlib/prelude.lumo")),
+    (
+        "prelude",
+        "prelude.lumo",
+        include_str!("../stdlib/prelude.lumo"),
+    ),
     ("int", "int.lumo", include_str!("../stdlib/int.lumo")),
 ];
 
@@ -61,7 +65,8 @@ pub fn check(file: &str, src: &str) -> Result<typed::Module, Failure> {
 pub fn compile(file: &str, src: &str) -> Result<String, Failure> {
     let stdlib = load_stdlib();
     let module = check_with(file, src, &stdlib)?;
-    let mut units: Vec<(&str, &typed::Module)> = stdlib.modules.iter().map(|(p, m)| (*p, m)).collect();
+    let mut units: Vec<(&str, &typed::Module)> =
+        stdlib.modules.iter().map(|(p, m)| (*p, m)).collect();
     units.push(("main", &module));
     Ok(codegen::emit_program(&units))
 }
@@ -80,7 +85,11 @@ fn frontend(file: &str, src: &str, env: &Env) -> Result<typed::Module, Failure> 
 }
 
 fn failure(file: &str, src: &str, diags: Vec<Diag>) -> Failure {
-    Failure { file: file.to_string(), src: src.to_string(), diags }
+    Failure {
+        file: file.to_string(),
+        src: src.to_string(),
+        diags,
+    }
 }
 
 fn validate_main(module: &typed::Module) -> Result<(), Diag> {
@@ -90,7 +99,9 @@ fn validate_main(module: &typed::Module) -> Result<(), Diag> {
     });
     match main {
         None => Err(Diag::error(Span::new(0, 0), "в программе нет функции main")),
-        Some(f) if !f.params.is_empty() => Err(Diag::error(f.span, "main не должна принимать параметры")),
+        Some(f) if !f.params.is_empty() => {
+            Err(Diag::error(f.span, "main не должна принимать параметры"))
+        }
         Some(_) => Ok(()),
     }
 }

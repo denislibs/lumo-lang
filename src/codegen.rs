@@ -7,13 +7,63 @@ use crate::typed;
 const RUNTIME: &str = include_str!("../runtime/lumo.js");
 
 const RESERVED: &[&str] = &[
-    "arguments", "await", "break", "case", "catch", "class", "console", "const", "continue",
-    "debugger", "default", "delete", "do", "document", "else", "enum", "eval", "export",
-    "exports", "extends", "false", "finally", "for", "function", "globalThis", "if",
-    "implements", "import", "in", "instanceof", "interface", "let", "module", "new", "null",
-    "package", "private", "process", "protected", "public", "require", "return", "static",
-    "super", "switch", "this", "throw", "true", "try", "typeof", "undefined", "var", "void",
-    "while", "window", "with", "yield",
+    "arguments",
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "console",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "document",
+    "else",
+    "enum",
+    "eval",
+    "export",
+    "exports",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "globalThis",
+    "if",
+    "implements",
+    "import",
+    "in",
+    "instanceof",
+    "interface",
+    "let",
+    "module",
+    "new",
+    "null",
+    "package",
+    "private",
+    "process",
+    "protected",
+    "public",
+    "require",
+    "return",
+    "static",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "undefined",
+    "var",
+    "void",
+    "while",
+    "window",
+    "with",
+    "yield",
 ];
 
 /// Собирает программу: рантайм, модули `(префикс, модуль)` по порядку и вызов `main$main()`.
@@ -97,7 +147,13 @@ struct Gen<'a> {
 impl<'a> Gen<'a> {
     fn new(prefix: &'a str, module: &'a typed::Module) -> Self {
         let globals = module.globals.iter().map(|(n, _)| n.as_str()).collect();
-        Gen { prefix, globals, scopes: Vec::new(), used: HashMap::new(), out: String::new() }
+        Gen {
+            prefix,
+            globals,
+            scopes: Vec::new(),
+            used: HashMap::new(),
+            out: String::new(),
+        }
     }
 
     fn function(&mut self, f: &FnDecl) {
@@ -107,20 +163,32 @@ impl<'a> Gen<'a> {
         let body = self.tail(&f.body);
         self.scopes.pop();
         let name = mangle(self.prefix, &f.name);
-        let _ = writeln!(self.out, "function {name}({}) {{\n{body}}}", params.join(", "));
+        let _ = writeln!(
+            self.out,
+            "function {name}({}) {{\n{body}}}",
+            params.join(", ")
+        );
     }
 
     fn external(&mut self, e: &ExternalDecl) {
         let params: Vec<String> = e.params.iter().map(|p| escape(&p.name)).collect();
         let list = params.join(", ");
         let name = mangle(self.prefix, &e.name);
-        let _ = writeln!(self.out, "function {name}({list}) {{ return ({})({list}); }}", e.js);
+        let _ = writeln!(
+            self.out,
+            "function {name}({list}) {{ return ({})({list}); }}",
+            e.js
+        );
     }
 
     /// Связывает локальное имя в текущей области и возвращает уникальное JS-имя.
     fn bind(&mut self, name: &str) -> String {
         let n = self.used.entry(name.to_string()).or_insert(0);
-        let js = if *n == 0 { escape(name) } else { format!("{name}${n}") };
+        let js = if *n == 0 {
+            escape(name)
+        } else {
+            format!("{name}${n}")
+        };
         *n += 1;
         self.scopes
             .last_mut()
@@ -169,7 +237,11 @@ impl<'a> Gen<'a> {
                 self.scopes.pop();
                 out
             }
-            ExprKind::If { cond, then_branch, else_branch } => {
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 let c = self.expr(cond);
                 let then = self.tail(then_branch);
                 match else_branch {
@@ -222,7 +294,11 @@ impl<'a> Gen<'a> {
                 self.scopes.pop();
                 format!("(({}) => {{\n{b}}})", ps.join(", "))
             }
-            ExprKind::If { cond, then_branch, else_branch } => {
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 let c = self.expr(cond);
                 let t = self.expr(then_branch);
                 let other = match else_branch {

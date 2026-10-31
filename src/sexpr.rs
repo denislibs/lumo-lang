@@ -11,7 +11,9 @@ pub fn expr(e: &Expr) -> String {
         ExprKind::Var(name) => name.clone(),
         ExprKind::ModuleAccess { module, name } => format!("{module}.{name}"),
         ExprKind::Unary { op, expr: inner } => format!("({} {})", op.symbol(), expr(inner)),
-        ExprKind::Binary { op, lhs, rhs } => format!("({} {} {})", op.symbol(), expr(lhs), expr(rhs)),
+        ExprKind::Binary { op, lhs, rhs } => {
+            format!("({} {} {})", op.symbol(), expr(lhs), expr(rhs))
+        }
         ExprKind::Call { callee, args } => {
             let args: String = args.iter().map(|a| format!(" {}", expr(a))).collect();
             format!("(call {}{args})", expr(callee))
@@ -20,7 +22,11 @@ pub fn expr(e: &Expr) -> String {
             let names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
             format!("(fn ({}) {})", names.join(" "), expr(body))
         }
-        ExprKind::If { cond, then_branch, else_branch } => match else_branch {
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => match else_branch {
             Some(e2) => format!("(if {} {} {})", expr(cond), expr(then_branch), expr(e2)),
             None => format!("(if {} {})", expr(cond), expr(then_branch)),
         },
@@ -43,7 +49,9 @@ pub fn type_expr(t: &TypeExpr) -> String {
         TypeExpr::Named { name, args, .. } if args.is_empty() => name.clone(),
         TypeExpr::Named { name, args, .. } => format!("{name}({})", type_list(args)),
         TypeExpr::Var { name, .. } => name.clone(),
-        TypeExpr::Fn { params, ret, .. } => format!("fn({}) -> {}", type_list(params), type_expr(ret)),
+        TypeExpr::Fn { params, ret, .. } => {
+            format!("fn({}) -> {}", type_list(params), type_expr(ret))
+        }
     }
 }
 

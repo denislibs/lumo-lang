@@ -1,4 +1,6 @@
-use crate::ast::{BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Module, Param, Stmt, TypeExpr, UnOp};
+use crate::ast::{
+    BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Module, Param, Stmt, TypeExpr, UnOp,
+};
 use crate::diagnostics::{Diag, Span};
 use crate::lexer::{Tok, Token};
 
@@ -38,7 +40,11 @@ struct Parser {
 
 impl Parser {
     fn new(toks: Vec<Token>) -> Self {
-        Parser { toks, pos: 0, diags: Vec::new() }
+        Parser {
+            toks,
+            pos: 0,
+            diags: Vec::new(),
+        }
     }
 
     fn module(&mut self) -> Module {
@@ -79,7 +85,10 @@ impl Parser {
         match self.peek() {
             Tok::Fn => Ok(Item::Fn(self.fn_decl()?)),
             Tok::At => Ok(Item::External(self.external()?)),
-            _ => Err(Diag::error(self.span(), "ожидалось объявление: fn или @external")),
+            _ => Err(Diag::error(
+                self.span(),
+                "ожидалось объявление: fn или @external",
+            )),
         }
     }
 
@@ -87,16 +96,29 @@ impl Parser {
         let start = self.expect(&Tok::Fn, "fn")?;
         let (name, _) = self.ident()?;
         let params = self.params()?;
-        let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
+        let ret = if self.eat(&Tok::Arrow) {
+            Some(self.type_expr()?)
+        } else {
+            None
+        };
         let body = self.block()?;
-        Ok(FnDecl { name, params, ret, span: start.to(body.span), body })
+        Ok(FnDecl {
+            name,
+            params,
+            ret,
+            span: start.to(body.span),
+            body,
+        })
     }
 
     fn external(&mut self) -> PResult<ExternalDecl> {
         let start = self.expect(&Tok::At, "@")?;
         let (attr, attr_span) = self.ident()?;
         if attr != "external" {
-            return Err(Diag::error(attr_span, format!("неизвестный атрибут @{attr}")));
+            return Err(Diag::error(
+                attr_span,
+                format!("неизвестный атрибут @{attr}"),
+            ));
         }
         self.expect(&Tok::LParen, "(")?;
         let t = self.advance();
@@ -109,12 +131,21 @@ impl Parser {
         let (name, _) = self.ident()?;
         let params = self.params()?;
         if let Some(p) = params.iter().find(|p| p.ty.is_none()) {
-            return Err(Diag::error(p.span, "у @external-функции типы параметров обязательны"));
+            return Err(Diag::error(
+                p.span,
+                "у @external-функции типы параметров обязательны",
+            ));
         }
         self.expect(&Tok::Arrow, "->")?;
         let ret = self.type_expr()?;
         let span = start.to(ret.span());
-        Ok(ExternalDecl { js, name, params, ret, span })
+        Ok(ExternalDecl {
+            js,
+            name,
+            params,
+            ret,
+            span,
+        })
     }
 
     fn peek(&self) -> &Tok {
@@ -173,7 +204,11 @@ impl Parser {
         let mut params = Vec::new();
         while !self.at(&Tok::RParen) {
             let (name, span) = self.ident()?;
-            let ty = if self.eat(&Tok::Colon) { Some(self.type_expr()?) } else { None };
+            let ty = if self.eat(&Tok::Colon) {
+                Some(self.type_expr()?)
+            } else {
+                None
+            };
             params.push(Param { name, ty, span });
             if !self.eat(&Tok::Comma) {
                 break;
@@ -198,7 +233,11 @@ impl Parser {
                     }
                     end = self.expect(&Tok::RParen, ")")?;
                 }
-                Ok(TypeExpr::Named { name, args, span: t.span.to(end) })
+                Ok(TypeExpr::Named {
+                    name,
+                    args,
+                    span: t.span.to(end),
+                })
             }
             Tok::Ident(name) => Ok(TypeExpr::Var { name, span: t.span }),
             Tok::Fn => {
@@ -214,7 +253,11 @@ impl Parser {
                 self.expect(&Tok::Arrow, "->")?;
                 let ret = self.type_expr()?;
                 let span = t.span.to(ret.span());
-                Ok(TypeExpr::Fn { params, ret: Box::new(ret), span })
+                Ok(TypeExpr::Fn {
+                    params,
+                    ret: Box::new(ret),
+                    span,
+                })
             }
             _ => Err(Diag::error(t.span, "ожидался тип")),
         }
@@ -234,7 +277,10 @@ impl Parser {
             }
         }
         let end = self.expect(&Tok::RBrace, "}")?;
-        Ok(Expr { kind: ExprKind::Block(stmts), span: start.to(end) })
+        Ok(Expr {
+            kind: ExprKind::Block(stmts),
+            span: start.to(end),
+        })
     }
 
     fn stmt(&mut self) -> PResult<Stmt> {
@@ -243,11 +289,20 @@ impl Parser {
         }
         let start = self.advance().span;
         let (name, _) = self.ident()?;
-        let ty = if self.eat(&Tok::Colon) { Some(self.type_expr()?) } else { None };
+        let ty = if self.eat(&Tok::Colon) {
+            Some(self.type_expr()?)
+        } else {
+            None
+        };
         self.expect(&Tok::Eq, "=")?;
         let value = self.expr()?;
         let span = start.to(value.span);
-        Ok(Stmt::Let { name, ty, value, span })
+        Ok(Stmt::Let {
+            name,
+            ty,
+            value,
+            span,
+        })
     }
 
     fn expr(&mut self) -> PResult<Expr> {
@@ -257,7 +312,9 @@ impl Parser {
     fn binary(&mut self, min_prec: u8) -> PResult<Expr> {
         let mut lhs = self.unary()?;
         loop {
-            let Some((prec, op)) = binop(self.peek()) else { break };
+            let Some((prec, op)) = binop(self.peek()) else {
+                break;
+            };
             if prec < min_prec {
                 break;
             }
@@ -267,7 +324,11 @@ impl Parser {
             lhs = match op {
                 None => pipe(lhs, rhs),
                 Some(op) => Expr {
-                    kind: ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                    kind: ExprKind::Binary {
+                        op,
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    },
                     span,
                 },
             };
@@ -285,7 +346,13 @@ impl Parser {
         let start = self.advance().span;
         let inner = self.unary()?;
         let span = start.to(inner.span);
-        Ok(Expr { kind: ExprKind::Unary { op, expr: Box::new(inner) }, span })
+        Ok(Expr {
+            kind: ExprKind::Unary {
+                op,
+                expr: Box::new(inner),
+            },
+            span,
+        })
     }
 
     fn postfix(&mut self) -> PResult<Expr> {
@@ -301,18 +368,25 @@ impl Parser {
                 }
                 let end = self.expect(&Tok::RParen, ")")?;
                 let span = e.span.to(end);
-                e = Expr { kind: ExprKind::Call { callee: Box::new(e), args }, span };
+                e = Expr {
+                    kind: ExprKind::Call {
+                        callee: Box::new(e),
+                        args,
+                    },
+                    span,
+                };
             } else if self.eat(&Tok::Dot) {
                 let (name, name_span) = self.ident()?;
                 let span = e.span.to(name_span);
                 e = match e.kind {
-                    ExprKind::Var(module) => Expr { kind: ExprKind::ModuleAccess { module, name }, span },
-                    _ => {
-                        return Err(Diag::error(
-                            span,
-                            "доступ через точку возможен только к функциям модулей, например list.map",
-                        ))
-                    }
+                    ExprKind::Var(module) => Expr {
+                        kind: ExprKind::ModuleAccess { module, name },
+                        span,
+                    },
+                    _ => return Err(Diag::error(
+                        span,
+                        "доступ через точку возможен только к функциям модулей, например list.map",
+                    )),
                 };
             } else {
                 break;
@@ -362,7 +436,11 @@ impl Parser {
             None
         };
         Ok(Expr {
-            kind: ExprKind::If { cond: Box::new(cond), then_branch: Box::new(then_branch), else_branch },
+            kind: ExprKind::If {
+                cond: Box::new(cond),
+                then_branch: Box::new(then_branch),
+                else_branch,
+            },
             span: start.to(end),
         })
     }
@@ -371,7 +449,13 @@ impl Parser {
         let params = self.params()?;
         let body = self.block()?;
         let span = start.to(body.span);
-        Ok(Expr { kind: ExprKind::Lambda { params, body: Box::new(body) }, span })
+        Ok(Expr {
+            kind: ExprKind::Lambda {
+                params,
+                body: Box::new(body),
+            },
+            span,
+        })
     }
 }
 
@@ -413,11 +497,23 @@ fn pipe(lhs: Expr, rhs: Expr) -> Expr {
     match rhs.kind {
         ExprKind::Call { callee, mut args } => {
             args.insert(0, lhs);
-            Expr { kind: ExprKind::Call { callee, args }, span }
+            Expr {
+                kind: ExprKind::Call { callee, args },
+                span,
+            }
         }
         other => {
-            let callee = Expr { kind: other, span: rhs.span };
-            Expr { kind: ExprKind::Call { callee: Box::new(callee), args: vec![lhs] }, span }
+            let callee = Expr {
+                kind: other,
+                span: rhs.span,
+            };
+            Expr {
+                kind: ExprKind::Call {
+                    callee: Box::new(callee),
+                    args: vec![lhs],
+                },
+                span,
+            }
         }
     }
 }
@@ -433,7 +529,9 @@ mod tests {
     }
 
     fn perr(src: &str) -> String {
-        parse_expr(lex(src).unwrap()).unwrap_err()[0].message.clone()
+        parse_expr(lex(src).unwrap()).unwrap_err()[0]
+            .message
+            .clone()
     }
 
     #[test]
@@ -475,7 +573,10 @@ mod tests {
 
     #[test]
     fn multiline_pipeline() {
-        assert_eq!(p("{\n  xs\n  |> f\n  |> g(1)\n}"), "(block (call g (call f xs) 1))");
+        assert_eq!(
+            p("{\n  xs\n  |> f\n  |> g(1)\n}"),
+            "(block (call g (call f xs) 1))"
+        );
     }
 
     #[test]
@@ -499,7 +600,9 @@ mod tests {
     #[test]
     fn function_declaration_with_annotations() {
         let m = module("fn add(a: Int, b) -> Int { a + b }");
-        let Item::Fn(f) = &m.items[0] else { panic!("ожидалась функция") };
+        let Item::Fn(f) = &m.items[0] else {
+            panic!("ожидалась функция")
+        };
         assert_eq!(f.name, "add");
         assert_eq!(sexpr::type_expr(f.params[0].ty.as_ref().unwrap()), "Int");
         assert!(f.params[1].ty.is_none());
@@ -510,14 +613,21 @@ mod tests {
     #[test]
     fn function_and_generic_types() {
         let m = module("fn f(g: fn(a, List(Int)) -> b) { g }");
-        let Item::Fn(f) = &m.items[0] else { panic!("ожидалась функция") };
-        assert_eq!(sexpr::type_expr(f.params[0].ty.as_ref().unwrap()), "fn(a, List(Int)) -> b");
+        let Item::Fn(f) = &m.items[0] else {
+            panic!("ожидалась функция")
+        };
+        assert_eq!(
+            sexpr::type_expr(f.params[0].ty.as_ref().unwrap()),
+            "fn(a, List(Int)) -> b"
+        );
     }
 
     #[test]
     fn external_declaration() {
         let m = module("@external(\"Math.sqrt\")\nfn sqrt(x: Float) -> Float");
-        let Item::External(e) = &m.items[0] else { panic!("ожидался @external") };
+        let Item::External(e) = &m.items[0] else {
+            panic!("ожидался @external")
+        };
         assert_eq!(e.js, "Math.sqrt");
         assert_eq!(e.name, "sqrt");
         assert_eq!(sexpr::type_expr(&e.ret), "Float");

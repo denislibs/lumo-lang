@@ -48,15 +48,28 @@ pub struct Param {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeExpr {
-    Named { name: String, args: Vec<TypeExpr>, span: Span },
-    Var { name: String, span: Span },
-    Fn { params: Vec<TypeExpr>, ret: Box<TypeExpr>, span: Span },
+    Named {
+        name: String,
+        args: Vec<TypeExpr>,
+        span: Span,
+    },
+    Var {
+        name: String,
+        span: Span,
+    },
+    Fn {
+        params: Vec<TypeExpr>,
+        ret: Box<TypeExpr>,
+        span: Span,
+    },
 }
 
 impl TypeExpr {
     pub fn span(&self) -> Span {
         match self {
-            TypeExpr::Named { span, .. } | TypeExpr::Var { span, .. } | TypeExpr::Fn { span, .. } => *span,
+            TypeExpr::Named { span, .. }
+            | TypeExpr::Var { span, .. }
+            | TypeExpr::Fn { span, .. } => *span,
         }
     }
 }
@@ -75,19 +88,44 @@ pub enum ExprKind {
     Bool(bool),
     Var(String),
     /// `int.to_string`
-    ModuleAccess { module: String, name: String },
-    Unary { op: UnOp, expr: Box<Expr> },
-    Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
-    Call { callee: Box<Expr>, args: Vec<Expr> },
-    Lambda { params: Vec<Param>, body: Box<Expr> },
-    If { cond: Box<Expr>, then_branch: Box<Expr>, else_branch: Option<Box<Expr>> },
+    ModuleAccess {
+        module: String,
+        name: String,
+    },
+    Unary {
+        op: UnOp,
+        expr: Box<Expr>,
+    },
+    Binary {
+        op: BinOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
+    Lambda {
+        params: Vec<Param>,
+        body: Box<Expr>,
+    },
+    If {
+        cond: Box<Expr>,
+        then_branch: Box<Expr>,
+        else_branch: Option<Box<Expr>>,
+    },
     /// Значение блока — последнее выражение; пустой блок или `let` в конце дают `Unit`.
     Block(Vec<Stmt>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    Let { name: String, ty: Option<TypeExpr>, value: Expr, span: Span },
+    Let {
+        name: String,
+        ty: Option<TypeExpr>,
+        value: Expr,
+        span: Span,
+    },
     Expr(Expr),
 }
 

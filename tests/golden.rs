@@ -11,7 +11,10 @@ fn run_case(name: &str, src: &str, expected: &str) -> Result<(), String> {
         .map_err(|f| format!("{name}: ошибка компиляции\n{}", f.render(false)))?;
     let js_path = env::temp_dir().join(format!("lumo-golden-{}-{name}.js", process::id()));
     fs::write(&js_path, js).unwrap();
-    let output = Command::new("node").arg(&js_path).output().expect("нужен node в PATH");
+    let output = Command::new("node")
+        .arg(&js_path)
+        .output()
+        .expect("нужен node в PATH");
     let _ = fs::remove_file(&js_path);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -43,7 +46,10 @@ fn golden_programs() {
         let expected = match fs::read_to_string(&out_path) {
             Ok(s) => s,
             Err(e) => {
-                failures.push(format!("{name}: нет ожидаемого вывода {}: {e}", out_path.display()));
+                failures.push(format!(
+                    "{name}: нет ожидаемого вывода {}: {e}",
+                    out_path.display()
+                ));
                 continue;
             }
         };
@@ -56,7 +62,8 @@ fn golden_programs() {
 
 #[test]
 fn harness_rejects_program_that_prints_then_fails() {
-    let src = "fn f(x) { x }\nfn main() {\n  print(\"до\")\n  let b = f == f\n  print(\"после\")\n}\n";
+    let src =
+        "fn f(x) { x }\nfn main() {\n  print(\"до\")\n  let b = f == f\n  print(\"после\")\n}\n";
     let err = run_case("throws", src, "до\nпосле\n").unwrap_err();
     assert!(err.contains("функции нельзя сравнивать"), "{err}");
     // даже если stdout совпал с ожиданием, падение не проходит

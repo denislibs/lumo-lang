@@ -163,7 +163,9 @@ impl Subst {
 fn replace(t: &Type, map: &HashMap<TVar, Type>) -> Type {
     match t {
         Type::Var(v) => map.get(v).cloned().unwrap_or_else(|| t.clone()),
-        Type::Con(name, args) => Type::Con(name.clone(), args.iter().map(|a| replace(a, map)).collect()),
+        Type::Con(name, args) => {
+            Type::Con(name.clone(), args.iter().map(|a| replace(a, map)).collect())
+        }
         Type::Fn(params, ret) => Type::Fn(
             params.iter().map(|p| replace(p, map)).collect(),
             Box::new(replace(ret, map)),
@@ -198,7 +200,10 @@ mod tests {
     #[test]
     fn reports_mismatch_and_occurs() {
         let mut s = Subst::new();
-        assert_eq!(s.unify(&Type::int(), &Type::bool()), Err(UnifyError::Mismatch));
+        assert_eq!(
+            s.unify(&Type::int(), &Type::bool()),
+            Err(UnifyError::Mismatch)
+        );
         let a = s.fresh(0);
         let f = Type::Fn(vec![a.clone()], Box::new(Type::int()));
         assert_eq!(s.unify(&a, &f), Err(UnifyError::Occurs));
@@ -218,7 +223,11 @@ mod tests {
         let mut s = Subst::new();
         let outer = s.fresh(1);
         let inner = s.fresh(2);
-        s.unify(&outer, &Type::Fn(vec![inner.clone()], Box::new(Type::int()))).unwrap();
+        s.unify(
+            &outer,
+            &Type::Fn(vec![inner.clone()], Box::new(Type::int())),
+        )
+        .unwrap();
         assert!(s.generalize(&inner, 1).vars.is_empty());
     }
 

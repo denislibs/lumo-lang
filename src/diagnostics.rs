@@ -28,7 +28,11 @@ pub struct Diag {
 
 impl Diag {
     pub fn error(span: Span, message: impl Into<String>) -> Self {
-        Diag { span, message: message.into(), hint: None }
+        Diag {
+            span,
+            message: message.into(),
+            hint: None,
+        }
     }
 
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
