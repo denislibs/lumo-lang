@@ -1,45 +1,69 @@
 use std::collections::HashSet;
 
-use crate::ast::{Expr, ExprKind, Stmt};
+use crate::ast::{Expr, ExprKind, Param, Stmt};
 
-/// Все имена переменных, упомянутые в выражении. Затенение не учитывается:
-/// лишние рёбра только укрупняют компоненты и не ломают вывод.
+/// Свободные имена выражения: имена, не связанные параметрами лямбд и `let`.
+/// Лишние рёбра зависимостей не безобидны: ложный цикл склеивает компоненты
+/// и делает функции мономорфными, поэтому затенение учитывается.
 pub fn referenced_names(e: &Expr, out: &mut HashSet<String>) {
+    free_names(&[], e, out);
+}
+
+/// Свободные имена тела функции с учётом её параметров.
+pub fn free_names(params: &[Param], body: &Expr, out: &mut HashSet<String>) {
+    let mut bound: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+    walk(body, &mut bound, out);
+}
+
+fn walk<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, out: &mut HashSet<String>) {
     match &e.kind {
         ExprKind::Var(name) => {
-            out.insert(name.clone());
+            if !bound.contains(&name.as_str()) {
+                out.insert(name.clone());
+            }
         }
         ExprKind::Int(_)
         | ExprKind::Float(_)
         | ExprKind::Str(_)
         | ExprKind::Bool(_)
         | ExprKind::ModuleAccess { .. } => {}
-        ExprKind::Unary { expr, .. } => referenced_names(expr, out),
+        ExprKind::Unary { expr, .. } => walk(expr, bound, out),
         ExprKind::Binary { lhs, rhs, .. } => {
-            referenced_names(lhs, out);
-            referenced_names(rhs, out);
+            walk(lhs, bound, out);
+            walk(rhs, bound, out);
         }
         ExprKind::Call { callee, args } => {
-            referenced_names(callee, out);
+            walk(callee, bound, out);
             for a in args {
-                referenced_names(a, out);
+                walk(a, bound, out);
             }
         }
-        ExprKind::Lambda { body, .. } => referenced_names(body, out),
+        ExprKind::Lambda { params, body } => {
+            let base = bound.len();
+            bound.extend(params.iter().map(|p| p.name.as_str()));
+            walk(body, bound, out);
+            bound.truncate(base);
+        }
         ExprKind::If { cond, then_branch, else_branch } => {
-            referenced_names(cond, out);
-            referenced_names(then_branch, out);
+            walk(cond, bound, out);
+            walk(then_branch, bound, out);
             if let Some(e) = else_branch {
-                referenced_names(e, out);
+                walk(e, bound, out);
             }
         }
         ExprKind::Block(stmts) => {
+            let base = bound.len();
             for s in stmts {
                 match s {
-                    Stmt::Let { value, .. } => referenced_names(value, out),
-                    Stmt::Expr(e) => referenced_names(e, out),
+                    // имя `let` виден только следующим инструкциям, не собственному значению
+                    Stmt::Let { name, value, .. } => {
+                        walk(value, bound, out);
+                        bound.push(name.as_str());
+                    }
+                    Stmt::Expr(e) => walk(e, bound, out),
                 }
             }
+            bound.truncate(base);
         }
     }
 }
@@ -122,7 +146,52 @@ mod tests {
         referenced_names(&e, &mut names);
         let mut names: Vec<_> = names.into_iter().collect();
         names.sort();
-        assert_eq!(names, vec!["f", "g", "x", "y"]);
+        assert_eq!(names, vec!["f", "g", "y"]);
+    }
+
+    fn free(src: &str) -> Vec<String> {
+        let e = parse_expr(lex(src).unwrap()).unwrap();
+        let mut names = HashSet::new();
+        referenced_names(&e, &mut names);
+        let mut names: Vec<_> = names.into_iter().collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn lambda_param_shadows_name() {
+        assert_eq!(free("fn(f) { f(g) }"), vec!["g"]);
+    }
+
+    #[test]
+    fn let_shadows_name_only_afterwards() {
+        // `x` в собственном значении let свободно, дальше — связано
+        assert_eq!(free("{\n let x = x\n x\n}"), vec!["x"]);
+        assert_eq!(free("{\n let h = 1\n h\n}"), Vec::<String>::new());
+        // после выхода из блока имя снова свободно
+        assert_eq!(free("{\n {\n let h = 1\n h\n }\n h\n}"), vec!["h"]);
+    }
+
+    #[test]
+    fn fn_params_are_bound() {
+        let e = parse_expr(lex("f(x)").unwrap()).unwrap();
+        let params = vec![Param { name: "f".into(), ty: None, span: Default::default() }];
+        let mut names = HashSet::new();
+        free_names(&params, &e, &mut names);
+        assert_eq!(names.into_iter().collect::<Vec<_>>(), vec!["x"]);
+    }
+
+    #[test]
+    fn diamond_and_cross_edges() {
+        assert_eq!(
+            scc(&[vec![1, 2], vec![3], vec![3], vec![]]),
+            vec![vec![3], vec![1], vec![2], vec![0]]
+        );
+        // перекрёстное ребро к уже завершённой компоненте
+        assert_eq!(
+            scc(&[vec![1, 2], vec![2], vec![]]),
+            vec![vec![2], vec![1], vec![0]]
+        );
     }
 
     #[test]

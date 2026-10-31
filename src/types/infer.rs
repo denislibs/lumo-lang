@@ -4,7 +4,7 @@ use crate::ast::{self, BinOp, Expr, ExprKind, Item, Stmt, TypeExpr, UnOp};
 use crate::diagnostics::{Diag, Span};
 use crate::typed;
 
-use super::deps::{referenced_names, scc};
+use super::deps::{free_names, scc};
 use super::env::Env;
 use super::ty::{display, Scheme, Type};
 use super::unify::{Subst, UnifyError};
@@ -52,7 +52,7 @@ pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec
         .iter()
         .map(|f| {
             let mut names = HashSet::new();
-            referenced_names(&f.body, &mut names);
+            free_names(&f.params, &f.body, &mut names);
             names.iter().filter_map(|n| index.get(n.as_str()).copied()).collect()
         })
         .collect();
@@ -521,6 +521,41 @@ mod tests {
     fn duplicate_declarations() {
         let errs = check_src("fn a() { 1 }\nfn a() { 2 }", &Env::default()).unwrap_err();
         assert!(errs[0].message.contains("уже объявлено"));
+    }
+
+    #[test]
+    fn shadowed_params_do_not_create_fake_cycles() {
+        // параметр `f` в `apply` не ссылается на функцию `f`
+        let m = check_src(
+            "fn apply(f, x) { f(x) }\n\
+             fn f(n) {\n  let s = apply(fn(y) { y }, \"a\")\n  n + 1\n}\n\
+             fn main() { apply(fn(z) { z }, 1) }",
+            &Env::default(),
+        )
+        .unwrap();
+        assert_eq!(sig(&m, "apply"), "fn(fn(a) -> b, a) -> b");
+    }
+
+    #[test]
+    fn shadowed_let_does_not_create_fake_cycles() {
+        let m = check_src(
+            "fn wrap(x) {\n  let helper = x\n  helper\n}\n\
+             fn helper() {\n  let a = wrap(1)\n  wrap(\"s\")\n}",
+            &Env::default(),
+        )
+        .unwrap();
+        assert_eq!(sig(&m, "wrap"), "fn(a) -> a");
+    }
+
+    #[test]
+    fn mutually_recursive_group_stays_monomorphic() {
+        let errs = check_src(
+            "fn f(x) { let a = g(1)\n x }\n\
+             fn g(y) { let b = f(\"s\")\n let c = f(1)\n y }",
+            &Env::default(),
+        )
+        .unwrap_err();
+        assert!(errs[0].message.contains("несовпадение типов"));
     }
 
     #[test]
