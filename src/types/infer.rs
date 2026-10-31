@@ -1,8 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::ast::{BinOp, Expr, ExprKind, Stmt, TypeExpr, UnOp};
+use crate::ast::{self, BinOp, Expr, ExprKind, Item, Stmt, TypeExpr, UnOp};
 use crate::diagnostics::{Diag, Span};
+use crate::typed;
 
+use super::deps::{referenced_names, scc};
 use super::env::Env;
 use super::ty::{display, Scheme, Type};
 use super::unify::{Subst, UnifyError};
@@ -15,6 +17,55 @@ pub fn type_of_expr(expr: &Expr, env: &Env) -> Result<Scheme, Vec<Diag>> {
     c.level = 0;
     let scheme = c.subst.generalize(&ty, 0);
     c.finish(scheme)
+}
+
+/// Проверяет модуль. Функции проверяются группами взаимной рекурсии (SCC),
+/// зависимости раньше зависящих; внутри группы типы мономорфны, после — обобщаются.
+pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec<Diag>> {
+    let mut c = Checker::new(env);
+    let mut seen = HashSet::new();
+    for item in &module.items {
+        let span = match item {
+            Item::Fn(f) => f.span,
+            Item::External(e) => e.span,
+        };
+        if !seen.insert(item.name()) {
+            c.diags.push(Diag::error(span, format!("`{}` уже объявлено в этом модуле", item.name())));
+        }
+    }
+    for item in &module.items {
+        if let Item::External(e) = item {
+            let scheme = c.external(e);
+            c.env.values.insert(e.name.clone(), scheme);
+        }
+    }
+    let fns: Vec<&ast::FnDecl> = module
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Fn(f) => Some(f),
+            Item::External(_) => None,
+        })
+        .collect();
+    let index: HashMap<&str, usize> = fns.iter().enumerate().map(|(i, f)| (f.name.as_str(), i)).collect();
+    let edges: Vec<Vec<usize>> = fns
+        .iter()
+        .map(|f| {
+            let mut names = HashSet::new();
+            referenced_names(&f.body, &mut names);
+            names.iter().filter_map(|n| index.get(n.as_str()).copied()).collect()
+        })
+        .collect();
+    for group in scc(&edges) {
+        let group: Vec<&ast::FnDecl> = group.iter().map(|&i| fns[i]).collect();
+        c.check_group(&group);
+    }
+    let globals = module
+        .items
+        .iter()
+        .map(|i| (i.name().to_string(), c.env.values[i.name()].clone()))
+        .collect();
+    c.finish(typed::Module { ast: module, globals })
 }
 
 struct Checker {
@@ -41,6 +92,50 @@ impl Checker {
             Ok(value)
         } else {
             Err(self.diags)
+        }
+    }
+
+    fn external(&mut self, e: &ast::ExternalDecl) -> Scheme {
+        self.level = 1;
+        let mut vars = HashMap::new();
+        let params: Vec<Type> = e
+            .params
+            .iter()
+            .map(|p| self.convert(p.ty.as_ref().expect("парсер требует типы у @external"), &mut vars))
+            .collect();
+        let ret = self.convert(&e.ret, &mut vars);
+        self.level = 0;
+        self.subst.generalize(&Type::Fn(params, Box::new(ret)), 0)
+    }
+
+    fn check_group(&mut self, group: &[&ast::FnDecl]) {
+        self.level = 1;
+        let mut sigs = Vec::new();
+        for f in group {
+            let mut vars = HashMap::new();
+            let params: Vec<Type> = f
+                .params
+                .iter()
+                .map(|p| self.annotation(p.ty.as_ref(), &mut vars))
+                .collect();
+            let ret = self.annotation(f.ret.as_ref(), &mut vars);
+            let ty = Type::Fn(params.clone(), Box::new(ret.clone()));
+            self.env.values.insert(f.name.clone(), Scheme::mono(ty.clone()));
+            sigs.push((params, ret, ty));
+        }
+        for (f, (params, ret, _)) in group.iter().zip(&sigs) {
+            let base = self.locals.len();
+            for (p, ty) in f.params.iter().zip(params) {
+                self.locals.push((p.name.clone(), Scheme::mono(ty.clone())));
+            }
+            let body = self.infer(&f.body);
+            self.expect(f.body.span, &body, ret);
+            self.locals.truncate(base);
+        }
+        self.level = 0;
+        for (f, (_, _, ty)) in group.iter().zip(&sigs) {
+            let scheme = self.subst.generalize(ty, 0);
+            self.env.values.insert(f.name.clone(), scheme);
         }
     }
 
@@ -365,5 +460,87 @@ mod tests {
         assert_eq!(t("fn(x: Int) { x }"), "fn(Int) -> Int");
         assert!(err("fn(x: Strin) { x }").contains("неизвестный тип `Strin`"));
         assert!(err("{\n let x: Int = \"s\"\n x\n}").contains("несовпадение типов"));
+    }
+
+    use crate::parser::parse;
+    use crate::typed;
+
+    fn check_src(src: &str, env: &Env) -> Result<typed::Module, Vec<Diag>> {
+        check_module(parse(lex(src).unwrap()).unwrap(), env)
+    }
+
+    fn sig(m: &typed::Module, name: &str) -> String {
+        display(&m.globals.iter().find(|(n, _)| n == name).unwrap().1.ty)
+    }
+
+    #[test]
+    fn declaration_order_does_not_matter() {
+        let m = check_src(
+            "fn main() {\n  let a = id(1)\n  id(\"s\")\n}\nfn id(x) { x }",
+            &Env::default(),
+        )
+        .unwrap();
+        assert_eq!(sig(&m, "id"), "fn(a) -> a");
+        assert_eq!(sig(&m, "main"), "fn() -> String");
+        let names: Vec<&str> = m.globals.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["main", "id"]);
+    }
+
+    #[test]
+    fn mutual_recursion() {
+        let m = check_src(
+            "fn is_even(n) { if n == 0 { true } else { is_odd(n - 1) } }\n\
+             fn is_odd(n) { if n == 0 { false } else { is_even(n - 1) } }",
+            &Env::default(),
+        )
+        .unwrap();
+        assert_eq!(sig(&m, "is_even"), "fn(Int) -> Bool");
+        assert_eq!(sig(&m, "is_odd"), "fn(Int) -> Bool");
+    }
+
+    #[test]
+    fn externals() {
+        let m = check_src(
+            "@external(\"Math.max\")\nfn max(a: Int, b: Int) -> Int\n\
+             @external(\"x => x\")\nfn ident(x: a) -> a\n\
+             fn f() { max(1, ident(2)) }",
+            &Env::default(),
+        )
+        .unwrap();
+        assert_eq!(sig(&m, "ident"), "fn(a) -> a");
+        assert_eq!(sig(&m, "f"), "fn() -> Int");
+    }
+
+    #[test]
+    fn return_annotation_is_checked() {
+        let errs = check_src("fn f() -> Int { \"s\" }", &Env::default()).unwrap_err();
+        assert!(errs[0].message.contains("ожидался Int, а здесь String"));
+    }
+
+    #[test]
+    fn duplicate_declarations() {
+        let errs = check_src("fn a() { 1 }\nfn a() { 2 }", &Env::default()).unwrap_err();
+        assert!(errs[0].message.contains("уже объявлено"));
+    }
+
+    #[test]
+    fn module_access() {
+        let mut env = Env::default();
+        let to_string = Scheme::mono(Type::Fn(vec![Type::int()], Box::new(Type::string())));
+        env.modules.entry("int".to_string()).or_default().insert("to_string".to_string(), to_string);
+        let m = check_src("fn f() { int.to_string(1) }", &env).unwrap();
+        assert_eq!(sig(&m, "f"), "fn() -> String");
+        let errs = check_src("fn f() { int.nope(1) }", &env).unwrap_err();
+        assert!(errs[0].message.contains("нет `nope`"));
+        let errs = check_src("fn f() { nope.x() }", &env).unwrap_err();
+        assert!(errs[0].message.contains("неизвестный модуль `nope`"));
+    }
+
+    #[test]
+    fn module_globals_shadow_env() {
+        let mut env = Env::default();
+        env.values.insert("print".to_string(), Scheme::mono(Type::Fn(vec![Type::string()], Box::new(Type::unit()))));
+        let m = check_src("fn print(x) { x }\nfn f() { print(1) }", &env).unwrap();
+        assert_eq!(sig(&m, "f"), "fn() -> Int");
     }
 }
