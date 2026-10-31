@@ -704,15 +704,16 @@ fn builtin_arity(name: &str) -> Option<usize> {
 - [ ] **Step 5: Codegen.** В `src/codegen.rs` в `expr`:
 ```rust
             ExprKind::List { items, tail } => {
-                let mut out = match tail {
+                let tail = match tail {
                     Some(t) => self.expr(t),
                     None => "null".to_string(),
                 };
-                for item in items.iter().rev() {
-                    let v = self.expr(item);
-                    out = format!("$cons({v}, {out})");
+                if items.is_empty() {
+                    return tail;
                 }
-                out
+                // массив + цикл в рантайме: длинные литералы не дают глубокой вложенности вызовов
+                let items: Vec<String> = items.iter().map(|i| self.expr(i)).collect();
+                format!("$list([{}], {tail})", items.join(", "))
             }
 ```
 
@@ -743,6 +744,13 @@ function $eq(a, b) {
 
 function $cons(h, t) {
   return { h, t };
+}
+
+// Список из массива элементов и хвоста; цикл вместо вложенных вызовов — длинные литералы не переполняют стек.
+function $list(items, tail) {
+  let out = tail;
+  for (let i = items.length - 1; i >= 0; i--) out = $cons(items[i], out);
+  return out;
 }
 
 // Значение в синтаксисе Lumo. Целые и дробные числа неразличимы в рантайме: 2.0 печатается как 2.
