@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn numbers() {
-        assert_eq!(kinds("42 3.14 1..2"), vec![Int(42), Float(3.14), Int(1), DotDot, Int(2), Eof]);
+        assert_eq!(kinds("42 2.5 1..2"), vec![Int(42), Float(2.5), Int(1), DotDot, Int(2), Eof]);
     }
 
     #[test]
