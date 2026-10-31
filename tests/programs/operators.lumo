@@ -1,0 +1,16 @@
+fn show(n) {
+  print(int.to_string(n))
+}
+
+fn main() {
+  show(7 / 2)
+  show(-7 / 2)
+  show(7 % 3)
+  show(5 / 0)
+  show(2 + 3 * 4)
+  show((2 + 3) * 4)
+  print("Lu" <> "mo")
+  print(if 1.5 +. 1.5 >. 2.9 { "float ок" } else { "float сломан" })
+  print(if 3 == 3 && "a" != "b" { "сравнения ок" } else { "сравнения сломаны" })
+  print(if !(1 > 2) || false { "логика ок" } else { "логика сломана" })
+}

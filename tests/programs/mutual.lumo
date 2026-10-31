@@ -1,0 +1,21 @@
+fn main() {
+  print(describe(10))
+  print(describe(7))
+  print(first("порядок объявления не важен", 0))
+}
+
+fn describe(n) {
+  if is_even(n) { "чётное" } else { "нечётное" }
+}
+
+fn is_even(n) {
+  if n == 0 { true } else { is_odd(n - 1) }
+}
+
+fn is_odd(n) {
+  if n == 0 { false } else { is_even(n - 1) }
+}
+
+fn first(a, b) {
+  a
+}

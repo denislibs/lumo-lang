@@ -1,4 +1,5 @@
 use crate::ast;
+use crate::codegen;
 use crate::diagnostics::{self, Diag, Span};
 use crate::lexer;
 use crate::parser;
@@ -54,6 +55,15 @@ pub fn load_stdlib() -> Stdlib {
 /// Проверяет программу: синтаксис, типы, наличие `main`.
 pub fn check(file: &str, src: &str) -> Result<typed::Module, Failure> {
     check_with(file, src, &load_stdlib())
+}
+
+/// Компилирует программу в самодостаточный JS.
+pub fn compile(file: &str, src: &str) -> Result<String, Failure> {
+    let stdlib = load_stdlib();
+    let module = check_with(file, src, &stdlib)?;
+    let mut units: Vec<(&str, &typed::Module)> = stdlib.modules.iter().map(|(p, m)| (*p, m)).collect();
+    units.push(("", &module));
+    Ok(codegen::emit_program(&units))
 }
 
 fn check_with(file: &str, src: &str, stdlib: &Stdlib) -> Result<typed::Module, Failure> {
