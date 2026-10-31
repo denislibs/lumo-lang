@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use crate::ast::{
-    BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Pattern, PatternKind, Stmt, TypeDecl, UnOp,
+    Arm, BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Pattern, PatternKind, Stmt, TypeDecl,
+    UnOp,
 };
 use crate::typed;
 
@@ -241,10 +242,46 @@ impl<'a> Gen<'a> {
         }
         let tmp = self.temp();
         let mut out = format!("const {tmp} = {value};\n");
+        let mut conds = Vec::new();
+        pattern_conds(pattern, &tmp, &mut conds);
+        if !conds.is_empty() {
+            let _ = writeln!(
+                out,
+                "if (!({})) throw new Error(\"Lumo: образец let не подошёл\");",
+                conds.join(" && ")
+            );
+        }
         for (name, access) in pattern_accesses(pattern, &tmp) {
             let js = self.bind(&name);
             let _ = writeln!(out, "const {js} = {access};");
         }
+        out
+    }
+
+    /// Цепочка `if` по веткам `match`; каждая ветка заканчивается `return`.
+    fn match_tail(&mut self, scrutinee: &Expr, arms: &[Arm]) -> String {
+        let tmp = self.temp();
+        let value = self.expr(scrutinee);
+        let mut out = format!("const {tmp} = {value};\n");
+        for arm in arms {
+            let mut conds = Vec::new();
+            pattern_conds(&arm.pattern, &tmp, &mut conds);
+            self.scopes.push(HashMap::new());
+            let mut body = String::new();
+            for (name, access) in pattern_accesses(&arm.pattern, &tmp) {
+                let js = self.bind(&name);
+                let _ = writeln!(body, "const {js} = {access};");
+            }
+            body.push_str(&self.tail(&arm.body));
+            self.scopes.pop();
+            if conds.is_empty() {
+                // ветка подходит всегда: остальные недостижимы
+                let _ = writeln!(out, "{{\n{body}}}");
+                return out;
+            }
+            let _ = writeln!(out, "if ({}) {{\n{body}}}", conds.join(" && "));
+        }
+        out.push_str("throw new Error(\"Lumo: match не покрыл значение\");\n");
         out
     }
 
@@ -302,6 +339,7 @@ impl<'a> Gen<'a> {
                     None => format!("if ({c}) {{\n{then}}}\nreturn undefined;\n"),
                 }
             }
+            ExprKind::Match { scrutinee, arms } => self.match_tail(scrutinee, arms),
             _ => format!("return {};\n", self.expr(e)),
         }
     }
@@ -380,6 +418,7 @@ impl<'a> Gen<'a> {
                 let items: Vec<String> = items.iter().map(|i| self.expr(i)).collect();
                 format!("[{}]", items.join(", "))
             }
+            ExprKind::Match { .. } => format!("(() => {{\n{}}})()", self.tail(e)),
             ExprKind::Block(stmts) => match stmts.as_slice() {
                 [Stmt::Expr(only)] => self.expr(only),
                 _ => format!("(() => {{\n{}}})()", self.tail(e)),
@@ -397,11 +436,64 @@ fn pattern_accesses(p: &Pattern, access: &str) -> Vec<(String, String)> {
 
 fn collect_accesses(p: &Pattern, access: String, out: &mut Vec<(String, String)>) {
     match &p.kind {
-        PatternKind::Wildcard => {}
+        PatternKind::Wildcard
+        | PatternKind::Int(_)
+        | PatternKind::Float(_)
+        | PatternKind::Str(_)
+        | PatternKind::Bool(_) => {}
         PatternKind::Var(name) => out.push((name.clone(), access)),
         PatternKind::Tuple(items) => {
             for (i, item) in items.iter().enumerate() {
                 collect_accesses(item, format!("{access}[{i}]"), out);
+            }
+        }
+        PatternKind::Ctor { args, .. } => {
+            for (i, a) in args.iter().enumerate() {
+                collect_accesses(a, format!("{access}._{i}"), out);
+            }
+        }
+        PatternKind::List { items, tail } => {
+            let mut cell = access;
+            for item in items {
+                collect_accesses(item, format!("{cell}.h"), out);
+                cell = format!("{cell}.t");
+            }
+            if let Some(t) = tail {
+                collect_accesses(t, cell, out);
+            }
+        }
+    }
+}
+
+/// Условия JS, при которых значение по пути `access` подходит под образец.
+fn pattern_conds(p: &Pattern, access: &str, out: &mut Vec<String>) {
+    match &p.kind {
+        PatternKind::Wildcard | PatternKind::Var(_) => {}
+        PatternKind::Int(n) => out.push(format!("{access} === {n}")),
+        PatternKind::Float(f) => out.push(format!("{access} === {f:?}")),
+        PatternKind::Str(s) => out.push(format!("{access} === {}", js_string(s))),
+        PatternKind::Bool(b) => out.push(format!("{access} === {b}")),
+        PatternKind::Tuple(items) => {
+            for (i, item) in items.iter().enumerate() {
+                pattern_conds(item, &format!("{access}[{i}]"), out);
+            }
+        }
+        PatternKind::Ctor { name, args } => {
+            out.push(format!("{access}.$ === {}", js_string(name)));
+            for (i, a) in args.iter().enumerate() {
+                pattern_conds(a, &format!("{access}._{i}"), out);
+            }
+        }
+        PatternKind::List { items, tail } => {
+            let mut cell = access.to_string();
+            for item in items {
+                out.push(format!("{cell} !== null"));
+                pattern_conds(item, &format!("{cell}.h"), out);
+                cell = format!("{cell}.t");
+            }
+            match tail {
+                None => out.push(format!("{cell} === null")),
+                Some(t) => pattern_conds(t, &cell, out),
             }
         }
     }

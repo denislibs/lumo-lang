@@ -282,6 +282,22 @@ impl Checker {
                 let tys = items.iter().map(|i| self.infer(i)).collect();
                 Type::tuple(tys)
             }
+            ExprKind::Match { scrutinee, arms } => {
+                let s = self.infer(scrutinee);
+                let result = self.subst.fresh(self.level);
+                for arm in arms {
+                    let base = self.locals.len();
+                    let mut binds = Vec::new();
+                    self.bind_pattern(&arm.pattern, &s, &mut binds);
+                    for (name, t) in binds {
+                        self.locals.push((name, Scheme::mono(t)));
+                    }
+                    let t = self.infer(&arm.body);
+                    self.expect(arm.body.span, &t, &result);
+                    self.locals.truncate(base);
+                }
+                result
+            }
         }
     }
 
@@ -578,6 +594,67 @@ impl Checker {
                 self.expect(p.span, &Type::tuple(tys.clone()), expected);
                 for (item, t) in items.iter().zip(&tys) {
                     self.bind_pattern(item, t, binds);
+                }
+            }
+            PatternKind::Int(_) => {
+                self.expect(p.span, &Type::int(), expected);
+            }
+            PatternKind::Float(_) => {
+                self.expect(p.span, &Type::float(), expected);
+            }
+            PatternKind::Str(_) => {
+                self.expect(p.span, &Type::string(), expected);
+            }
+            PatternKind::Bool(_) => {
+                self.expect(p.span, &Type::bool(), expected);
+            }
+            PatternKind::List { items, tail } => {
+                let elem = self.subst.fresh(self.level);
+                let list = Type::list(elem.clone());
+                self.expect(p.span, &list, expected);
+                for item in items {
+                    self.bind_pattern(item, &elem, binds);
+                }
+                if let Some(tail) = tail {
+                    self.bind_pattern(tail, &list, binds);
+                }
+            }
+            PatternKind::Ctor { name, args } => {
+                let info = self.env.ctors.get(name).cloned();
+                let fields = match info {
+                    None => {
+                        self.diags.push(Diag::error(
+                            p.span,
+                            format!("неизвестный конструктор `{name}`"),
+                        ));
+                        None
+                    }
+                    Some(info) if info.arity != args.len() => {
+                        self.diags.push(Diag::error(
+                            p.span,
+                            format!(
+                                "конструктор `{name}` принимает аргументов: {}, а передано: {}",
+                                info.arity,
+                                args.len()
+                            ),
+                        ));
+                        None
+                    }
+                    Some(info) => {
+                        let (fields, result) =
+                            match self.subst.instantiate(&info.scheme, self.level) {
+                                Type::Fn(fields, result) => (fields, *result),
+                                other => (Vec::new(), other),
+                            };
+                        self.expect(p.span, &result, expected);
+                        Some(fields)
+                    }
+                };
+                // при ошибке имена всё равно связываем, чтобы не плодить «неизвестное имя»
+                let fields = fields
+                    .unwrap_or_else(|| args.iter().map(|_| self.subst.fresh(self.level)).collect());
+                for (a, t) in args.iter().zip(&fields) {
+                    self.bind_pattern(a, t, binds);
                 }
             }
         }
@@ -942,5 +1019,43 @@ mod tests {
         assert!(e("fn f() { Nope }").contains("неизвестный конструктор `Nope`"));
         assert!(e(&format!("{OPTION}fn f() {{ Some(1) == Some(\"s\") }}"))
             .contains("несовпадение типов"));
+    }
+
+    #[test]
+    fn match_typing() {
+        let m = check_src(
+            &format!("{OPTION}fn unwrap(o, d) {{\n  match o {{\n    Some(x) -> x\n    None -> d\n  }}\n}}\nfn head(xs, d) {{\n  match xs {{\n    [x, ..] -> x\n    [] -> d\n  }}\n}}"),
+            &Env::default(),
+        )
+        .unwrap();
+        assert_eq!(sig(&m, "unwrap"), "fn(Option(a), a) -> a");
+        assert_eq!(sig(&m, "head"), "fn(List(a), a) -> a");
+        assert_eq!(
+            t("match 1 {\n 0 -> \"ноль\"\n _ -> \"другое\"\n}"),
+            "String"
+        );
+    }
+
+    #[test]
+    fn match_errors() {
+        let e = |src: &str| {
+            check_src(src, &Env::default()).unwrap_err()[0]
+                .message
+                .clone()
+        };
+        assert!(e(&format!(
+            "{OPTION}fn f(o) {{\n  match o {{\n    Some(a, b) -> a\n    _ -> 1\n  }}\n}}"
+        ))
+        .contains("принимает аргументов: 1, а передано: 2"));
+        assert!(e(&format!(
+            "{OPTION}fn f(o) {{\n  match o {{\n    Some(x) -> x\n    None -> x\n  }}\n}}"
+        ))
+        .contains("неизвестное имя `x`"));
+        assert!(
+            e("fn f() {\n  match 1 {\n    Nope -> 1\n    _ -> 2\n  }\n}")
+                .contains("неизвестный конструктор `Nope`")
+        );
+        assert!(err("match 1 {\n 1 -> \"a\"\n _ -> 2\n}").contains("ожидался String, а здесь Int"));
+        assert!(err("match 1 {\n \"s\" -> 1\n _ -> 2\n}").contains("ожидался Int, а здесь String"));
     }
 }

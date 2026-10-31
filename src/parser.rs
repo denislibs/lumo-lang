@@ -1,6 +1,6 @@
 use crate::ast::{
-    BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Module, Param, Pattern, PatternKind, Stmt,
-    TypeDecl, TypeExpr, UnOp, Variant,
+    Arm, BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Module, Param, Pattern, PatternKind,
+    Stmt, TypeDecl, TypeExpr, UnOp, Variant,
 };
 use crate::diagnostics::{Diag, Span};
 use crate::lexer::{Tok, Token};
@@ -500,6 +500,7 @@ impl Parser {
             Tok::Fn => return self.lambda(t.span),
             Tok::Hash => return self.tuple(t.span),
             Tok::LBracket => return self.list(t.span),
+            Tok::Match => return self.match_expr(t.span),
             _ => return Err(Diag::error(t.span, "ожидалось выражение")),
         };
         Ok(Expr { kind, span: t.span })
@@ -543,6 +544,45 @@ impl Parser {
         })
     }
 
+    /// `match scrutinee { pattern -> body ... }` — после `match`.
+    fn match_expr(&mut self, start: Span) -> PResult<Expr> {
+        let scrutinee = self.expr()?;
+        self.expect(&Tok::LBrace, "{")?;
+        let mut arms = Vec::new();
+        loop {
+            while self.eat(&Tok::Newline) || self.eat(&Tok::Semi) {}
+            if self.at(&Tok::RBrace) {
+                break;
+            }
+            let pattern = self.pattern()?;
+            self.expect(&Tok::Arrow, "->")?;
+            let body = self.expr()?;
+            let span = pattern.span.to(body.span);
+            arms.push(Arm {
+                pattern,
+                body,
+                span,
+            });
+            if !matches!(self.peek(), Tok::Newline | Tok::Semi | Tok::RBrace) {
+                return Err(Diag::error(self.span(), "ожидался перевод строки или `}`"));
+            }
+        }
+        let end = self.expect(&Tok::RBrace, "}")?;
+        if arms.is_empty() {
+            return Err(Diag::error(
+                start.to(end),
+                "у match должна быть хотя бы одна ветка",
+            ));
+        }
+        Ok(Expr {
+            kind: ExprKind::Match {
+                scrutinee: Box::new(scrutinee),
+                arms,
+            },
+            span: start.to(end),
+        })
+    }
+
     fn pattern(&mut self) -> PResult<Pattern> {
         let t = self.advance();
         let kind = match t.tok {
@@ -554,6 +594,64 @@ impl Parser {
                 let end = self.expect(&Tok::RParen, ")")?;
                 return Ok(Pattern {
                     kind: PatternKind::Tuple(items),
+                    span: t.span.to(end),
+                });
+            }
+            Tok::Int(n) => PatternKind::Int(n),
+            Tok::Float(f) => PatternKind::Float(f),
+            Tok::Str(s) => PatternKind::Str(s),
+            Tok::True => PatternKind::Bool(true),
+            Tok::False => PatternKind::Bool(false),
+            Tok::Minus => {
+                let n = self.advance();
+                let Tok::Int(v) = n.tok else {
+                    return Err(Diag::error(
+                        n.span,
+                        "после `-` в образце ожидалось целое число",
+                    ));
+                };
+                return Ok(Pattern {
+                    kind: PatternKind::Int(-v),
+                    span: t.span.to(n.span),
+                });
+            }
+            Tok::Upper(name) => {
+                let mut args = Vec::new();
+                let mut end = t.span;
+                if self.eat(&Tok::LParen) {
+                    args = self.pattern_list(&Tok::RParen)?;
+                    end = self.expect(&Tok::RParen, ")")?;
+                }
+                return Ok(Pattern {
+                    kind: PatternKind::Ctor { name, args },
+                    span: t.span.to(end),
+                });
+            }
+            Tok::LBracket => {
+                let mut items = Vec::new();
+                let mut tail = None;
+                while !self.at(&Tok::RBracket) {
+                    if self.at(&Tok::DotDot) {
+                        let dots = self.advance().span;
+                        let rest = if self.at(&Tok::RBracket) {
+                            Pattern {
+                                kind: PatternKind::Wildcard,
+                                span: dots,
+                            }
+                        } else {
+                            self.pattern()?
+                        };
+                        tail = Some(Box::new(rest));
+                        break;
+                    }
+                    items.push(self.pattern()?);
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                let end = self.expect(&Tok::RBracket, "]")?;
+                return Ok(Pattern {
+                    kind: PatternKind::List { items, tail },
                     span: t.span.to(end),
                 });
             }
@@ -884,5 +982,19 @@ mod tests {
             sexpr::type_expr(f.params[0].ty.as_ref().unwrap()),
             "#(Int, fn(a) -> b)"
         );
+    }
+
+    #[test]
+    fn match_and_patterns() {
+        assert_eq!(
+            p("match x {\n Some(#(a, _)) -> a\n [1, ..rest] -> 2\n -3 -> 4\n \"s\" -> 5\n [] -> 6\n [a, ..] -> 7\n None -> 8\n}"),
+            "(match x (Some(#(a, _)) a) ([1, ..rest] 2) (-3 4) (\"s\" 5) ([] 6) ([a, .._] 7) (None 8))"
+        );
+        assert_eq!(
+            p("match b {\n true -> 1\n false -> 2\n}"),
+            "(match b (true 1) (false 2))"
+        );
+        assert!(perr("match x {}").contains("хотя бы одна ветка"));
+        assert!(perr("match x {\n - a -> 1\n}").contains("после `-`"));
     }
 }

@@ -149,6 +149,17 @@ pub enum ExprKind {
     Block(Vec<Stmt>),
     /// `#(a, b)`
     Tuple(Vec<Expr>),
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<Arm>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Arm {
+    pub pattern: Pattern,
+    pub body: Expr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -248,6 +259,20 @@ pub enum PatternKind {
     Var(String),
     /// `#(a, b)`
     Tuple(Vec<Pattern>),
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+    /// `Some(x)`, `None`
+    Ctor {
+        name: String,
+        args: Vec<Pattern>,
+    },
+    /// `[a, b]`, `[a, ..rest]`, `[a, ..]`
+    List {
+        items: Vec<Pattern>,
+        tail: Option<Box<Pattern>>,
+    },
 }
 
 impl Pattern {
@@ -260,11 +285,23 @@ impl Pattern {
 
     fn collect_bindings<'a>(&'a self, out: &mut Vec<(&'a str, Span)>) {
         match &self.kind {
-            PatternKind::Wildcard => {}
+            PatternKind::Wildcard
+            | PatternKind::Int(_)
+            | PatternKind::Float(_)
+            | PatternKind::Str(_)
+            | PatternKind::Bool(_) => {}
             PatternKind::Var(name) => out.push((name, self.span)),
-            PatternKind::Tuple(items) => {
+            PatternKind::Tuple(items) | PatternKind::Ctor { args: items, .. } => {
                 for p in items {
                     p.collect_bindings(out);
+                }
+            }
+            PatternKind::List { items, tail } => {
+                for p in items {
+                    p.collect_bindings(out);
+                }
+                if let Some(t) = tail {
+                    t.collect_bindings(out);
                 }
             }
         }

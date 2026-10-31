@@ -47,6 +47,13 @@ pub fn expr(e: &Expr) -> String {
             let items: String = items.iter().map(|i| format!(" {}", expr(i))).collect();
             format!("(tuple{items})")
         }
+        ExprKind::Match { scrutinee, arms } => {
+            let arms: String = arms
+                .iter()
+                .map(|a| format!(" ({} {})", pattern(&a.pattern), expr(&a.body)))
+                .collect();
+            format!("(match {}{arms})", expr(scrutinee))
+        }
     }
 }
 
@@ -81,7 +88,20 @@ pub fn pattern(p: &Pattern) -> String {
     match &p.kind {
         PatternKind::Wildcard => "_".to_string(),
         PatternKind::Var(name) => name.clone(),
+        PatternKind::Int(n) => n.to_string(),
+        PatternKind::Float(f) => format!("{f:?}"),
+        PatternKind::Str(s) => format!("{s:?}"),
+        PatternKind::Bool(b) => b.to_string(),
         PatternKind::Tuple(items) => format!("#({})", pattern_list(items)),
+        PatternKind::Ctor { name, args } if args.is_empty() => name.clone(),
+        PatternKind::Ctor { name, args } => format!("{name}({})", pattern_list(args)),
+        PatternKind::List { items, tail } => {
+            let mut parts: Vec<String> = items.iter().map(pattern).collect();
+            if let Some(t) = tail {
+                parts.push(format!("..{}", pattern(t)));
+            }
+            format!("[{}]", parts.join(", "))
+        }
     }
 }
 

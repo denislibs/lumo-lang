@@ -69,6 +69,15 @@ fn walk<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, out: &mut HashSet<String>) {
                 walk(i, bound, out);
             }
         }
+        ExprKind::Match { scrutinee, arms } => {
+            walk(scrutinee, bound, out);
+            for arm in arms {
+                let base = bound.len();
+                bound.extend(arm.pattern.bindings().into_iter().map(|(n, _)| n));
+                walk(&arm.body, bound, out);
+                bound.truncate(base);
+            }
+        }
         ExprKind::Block(stmts) => {
             let base = bound.len();
             for s in stmts {
@@ -238,5 +247,15 @@ mod tests {
     fn mutual_recursion_is_one_component() {
         assert_eq!(scc(&[vec![1], vec![0], vec![]]), vec![vec![0, 1], vec![2]]);
         assert_eq!(scc(&[vec![0]]), vec![vec![0]]);
+    }
+
+    #[test]
+    fn match_arm_binds_names() {
+        let e = parse_expr(lex("match o {\n Some(f) -> f(g)\n None -> h\n}").unwrap()).unwrap();
+        let mut names = HashSet::new();
+        referenced_names(&e, &mut names);
+        let mut names: Vec<_> = names.into_iter().collect();
+        names.sort();
+        assert_eq!(names, vec!["g", "h", "o"]);
     }
 }
