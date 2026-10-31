@@ -21,15 +21,6 @@ pub fn type_of_expr(expr: &Expr, env: &Env) -> Result<Scheme, Vec<Diag>> {
 
 /// Проверяет модуль. Функции проверяются группами взаимной рекурсии (SCC),
 /// зависимости раньше зависящих; внутри группы типы мономорфны, после — обобщаются.
-/// Арность встроенного типа.
-fn builtin_arity(name: &str) -> Option<usize> {
-    match name {
-        "Int" | "Float" | "Bool" | "String" | "Unit" => Some(0),
-        "List" => Some(1),
-        _ => None,
-    }
-}
-
 pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec<Diag>> {
     let mut c = Checker::new(env);
     let mut seen = HashSet::new();
@@ -508,6 +499,15 @@ impl Checker {
         if let Some(d) = self.diags.last_mut() {
             d.hint = Some(hint.to_string());
         }
+    }
+}
+
+/// Арность встроенного типа.
+fn builtin_arity(name: &str) -> Option<usize> {
+    match name {
+        "Int" | "Float" | "Bool" | "String" | "Unit" => Some(0),
+        "List" => Some(1),
+        _ => None,
     }
 }
 

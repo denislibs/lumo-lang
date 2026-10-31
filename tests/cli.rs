@@ -113,3 +113,17 @@ fn comparing_functions_fails_at_runtime() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("функции нельзя сравнивать"));
 }
+
+#[test]
+fn comparing_lists_of_functions_fails_at_runtime() {
+    let file = write_tmp(
+        "fn_eq.lumo",
+        "fn main() {\n  print(if [fn(x) { x }] == [fn(x) { x }] { \"a\" } else { \"b\" })\n}\n",
+    );
+    let out = lumo()
+        .args(["run", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("функции нельзя сравнивать"));
+}

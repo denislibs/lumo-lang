@@ -333,15 +333,16 @@ impl<'a> Gen<'a> {
                 format!("({c} ? {t} : {other})")
             }
             ExprKind::List { items, tail } => {
-                let mut out = match tail {
+                let tail = match tail {
                     Some(t) => self.expr(t),
                     None => "null".to_string(),
                 };
-                for item in items.iter().rev() {
-                    let v = self.expr(item);
-                    out = format!("$cons({v}, {out})");
+                if items.is_empty() {
+                    tail
+                } else {
+                    let items: Vec<String> = items.iter().map(|i| self.expr(i)).collect();
+                    format!("$list([{}], {tail})", items.join(", "))
                 }
-                out
             }
             ExprKind::Tuple(items) => {
                 let items: Vec<String> = items.iter().map(|i| self.expr(i)).collect();

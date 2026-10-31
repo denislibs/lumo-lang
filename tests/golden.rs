@@ -70,3 +70,13 @@ fn harness_rejects_program_that_prints_then_fails() {
     let err = run_case("throws2", src, "до\n").unwrap_err();
     assert!(err.contains("статус"), "{err}");
 }
+
+#[test]
+fn long_list_literal_does_not_overflow_stack() {
+    let items: Vec<String> = (0..5000).map(|i| i.to_string()).collect();
+    let lit = format!("[{}]", items.join(", "));
+    let src = format!(
+        "fn main() {{\n  let xs = {lit}\n  print(if xs == {lit} {{ \"ok\" }} else {{ \"no\" }})\n}}\n"
+    );
+    run_case("long_list", &src, "ok\n").unwrap();
+}

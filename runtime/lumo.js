@@ -36,6 +36,13 @@ function $cons(h, t) {
   return { h, t };
 }
 
+// Список из массива элементов и хвоста; цикл вместо вложенных вызовов — длинные литералы не переполняют стек.
+function $list(items, tail) {
+  let out = tail;
+  for (let i = items.length - 1; i >= 0; i--) out = $cons(items[i], out);
+  return out;
+}
+
 // Значение в синтаксисе Lumo. Целые и дробные числа неразличимы в рантайме: 2.0 печатается как 2.
 function $inspect(v) {
   if (v === undefined) return "Unit";
