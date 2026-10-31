@@ -88,6 +88,11 @@ pub struct Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
+    /// `[a, b]` или `[a, ..rest]`
+    List {
+        items: Vec<Expr>,
+        tail: Option<Box<Expr>>,
+    },
     Int(i64),
     Float(f64),
     Str(String),

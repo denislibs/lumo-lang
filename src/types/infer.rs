@@ -21,6 +21,15 @@ pub fn type_of_expr(expr: &Expr, env: &Env) -> Result<Scheme, Vec<Diag>> {
 
 /// Проверяет модуль. Функции проверяются группами взаимной рекурсии (SCC),
 /// зависимости раньше зависящих; внутри группы типы мономорфны, после — обобщаются.
+/// Арность встроенного типа.
+fn builtin_arity(name: &str) -> Option<usize> {
+    match name {
+        "Int" | "Float" | "Bool" | "String" | "Unit" => Some(0),
+        "List" => Some(1),
+        _ => None,
+    }
+}
+
 pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec<Diag>> {
     let mut c = Checker::new(env);
     let mut seen = HashSet::new();
@@ -239,6 +248,19 @@ impl Checker {
                 }
             }
             ExprKind::Block(stmts) => self.block(stmts),
+            ExprKind::List { items, tail } => {
+                let elem = self.subst.fresh(self.level);
+                for item in items {
+                    let t = self.infer(item);
+                    self.expect(item.span, &t, &elem);
+                }
+                let list = Type::list(elem);
+                if let Some(tail) = tail {
+                    let t = self.infer(tail);
+                    self.expect(tail.span, &t, &list);
+                }
+                list
+            }
             ExprKind::Tuple(items) => {
                 let tys = items.iter().map(|i| self.infer(i)).collect();
                 Type::tuple(tys)
@@ -389,22 +411,34 @@ impl Checker {
         }
     }
 
+    /// Число параметров типа или `None`, если такого типа нет.
+    fn type_arity(&self, name: &str) -> Option<usize> {
+        builtin_arity(name)
+    }
+
     /// Аннотация → тип. `vars` — переменные типов, видимые в объявлении.
     fn convert(&mut self, t: &TypeExpr, vars: &mut HashMap<String, Type>) -> Type {
         match t {
             TypeExpr::Named { name, args, span } => {
-                if !matches!(name.as_str(), "Int" | "Float" | "Bool" | "String" | "Unit") {
+                let Some(arity) = self.type_arity(name) else {
                     self.diags
                         .push(Diag::error(*span, format!("неизвестный тип `{name}`")));
                     return self.subst.fresh(self.level);
+                };
+                if args.len() != arity {
+                    let msg = if arity == 0 {
+                        format!("тип `{name}` не принимает параметров")
+                    } else {
+                        format!(
+                            "тип `{name}` принимает параметров: {arity}, а передано: {}",
+                            args.len()
+                        )
+                    };
+                    self.diags.push(Diag::error(*span, msg));
+                    return self.subst.fresh(self.level);
                 }
-                if !args.is_empty() {
-                    self.diags.push(Diag::error(
-                        *span,
-                        format!("тип `{name}` не принимает параметров"),
-                    ));
-                }
-                Type::con(name)
+                let args = args.iter().map(|a| self.convert(a, vars)).collect();
+                Type::Con(name.clone(), args)
             }
             TypeExpr::Var { name, .. } => {
                 let level = self.level;
@@ -497,6 +531,18 @@ mod tests {
 
     fn err(src: &str) -> String {
         errs(src)[0].message.clone()
+    }
+
+    #[test]
+    fn lists() {
+        assert_eq!(t("[1, 2]"), "List(Int)");
+        assert_eq!(t("[]"), "List(a)");
+        assert_eq!(t("fn(x, xs) { [x, ..xs] }"), "fn(a, List(a)) -> List(a)");
+        assert_eq!(t("fn(xs: List(Int)) { xs }"), "fn(List(Int)) -> List(Int)");
+        assert!(err("[1, \"s\"]").contains("ожидался Int, а здесь String"));
+        assert!(err("[1, ..2]").contains("ожидался List(Int), а здесь Int"));
+        assert!(err("fn(x: List) { x }").contains("принимает параметров: 1, а передано: 0"));
+        assert!(err("fn(x: Int(Int)) { x }").contains("не принимает параметров"));
     }
 
     #[test]

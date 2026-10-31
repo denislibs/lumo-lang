@@ -34,6 +34,10 @@ impl Type {
         Type::con("Unit")
     }
 
+    pub fn list(elem: Type) -> Type {
+        Type::Con("List".to_string(), vec![elem])
+    }
+
     /// Кортеж: `#(a, b)`.
     pub fn tuple(elems: Vec<Type>) -> Type {
         Type::Con("#".to_string(), elems)

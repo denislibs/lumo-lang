@@ -431,9 +431,31 @@ impl Parser {
             Tok::If => return self.if_expr(t.span),
             Tok::Fn => return self.lambda(t.span),
             Tok::Hash => return self.tuple(t.span),
+            Tok::LBracket => return self.list(t.span),
             _ => return Err(Diag::error(t.span, "ожидалось выражение")),
         };
         Ok(Expr { kind, span: t.span })
+    }
+
+    /// `[a, b]` или `[a, b, ..rest]` — после `[`.
+    fn list(&mut self, start: Span) -> PResult<Expr> {
+        let mut items = Vec::new();
+        let mut tail = None;
+        while !self.at(&Tok::RBracket) {
+            if self.eat(&Tok::DotDot) {
+                tail = Some(Box::new(self.expr()?));
+                break;
+            }
+            items.push(self.expr()?);
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        let end = self.expect(&Tok::RBracket, "]")?;
+        Ok(Expr {
+            kind: ExprKind::List { items, tail },
+            span: start.to(end),
+        })
     }
 
     /// `#(a, b)` — после `#`.
@@ -591,6 +613,14 @@ mod tests {
 
     fn p(src: &str) -> String {
         sexpr::expr(&parse_expr(lex(src).unwrap()).unwrap())
+    }
+
+    #[test]
+    fn list_literals() {
+        assert_eq!(p("[1, 2]"), "(list 1 2)");
+        assert_eq!(p("[]"), "(list)");
+        assert_eq!(p("[x, ..xs]"), "(list x ..xs)");
+        assert_eq!(p("[\n 1,\n 2\n]"), "(list 1 2)");
     }
 
     fn perr(src: &str) -> String {

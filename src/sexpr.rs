@@ -34,6 +34,14 @@ pub fn expr(e: &Expr) -> String {
             let body: String = stmts.iter().map(|s| format!(" {}", stmt(s))).collect();
             format!("(block{body})")
         }
+        ExprKind::List { items, tail } => {
+            let items: String = items.iter().map(|i| format!(" {}", expr(i))).collect();
+            let tail = tail
+                .as_ref()
+                .map(|t| format!(" ..{}", expr(t)))
+                .unwrap_or_default();
+            format!("(list{items}{tail})")
+        }
         ExprKind::Tuple(items) => {
             let items: String = items.iter().map(|i| format!(" {}", expr(i))).collect();
             format!("(tuple{items})")

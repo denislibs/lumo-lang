@@ -2,3 +2,6 @@
 
 @external("$print")
 fn print(s: String) -> Unit
+
+@external("$debug")
+fn debug(x: a) -> a

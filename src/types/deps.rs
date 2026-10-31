@@ -55,6 +55,14 @@ fn walk<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, out: &mut HashSet<String>) {
                 walk(e, bound, out);
             }
         }
+        ExprKind::List { items, tail } => {
+            for i in items {
+                walk(i, bound, out);
+            }
+            if let Some(t) = tail {
+                walk(t, bound, out);
+            }
+        }
         ExprKind::Tuple(items) => {
             for i in items {
                 walk(i, bound, out);
