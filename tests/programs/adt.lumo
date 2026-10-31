@@ -1,0 +1,24 @@
+type Shape {
+  Circle(Float)
+  Rect(Float, Float)
+}
+
+type Pair(a, b) {
+  Pair(a, b)
+}
+
+type Color {
+  Red
+  Green
+}
+
+fn main() {
+  debug(Circle(1.5))
+  debug(Rect(2.5, 3.5))
+  debug(Pair("ключ", [1, 2]))
+  debug(Red)
+  let make = Pair
+  debug(make(1, Green))
+  print(if Pair(1, Red) == Pair(1, Red) { "равны" } else { "разные" })
+  print(if Red == Green { "равны" } else { "разные" })
+}

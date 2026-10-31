@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use crate::ast::{
-    BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Pattern, PatternKind, Stmt, UnOp,
+    BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Pattern, PatternKind, Stmt, TypeDecl, UnOp,
 };
 use crate::typed;
 
@@ -78,6 +78,7 @@ pub fn emit_program(units: &[(&str, &typed::Module)]) -> String {
             match item {
                 Item::Fn(f) => gen.function(f),
                 Item::External(e) => gen.external(e),
+                Item::Type(t) => gen.type_decl(t),
             }
         }
         out.push_str(&gen.out);
@@ -139,6 +140,8 @@ fn js_op(op: BinOp) -> &'static str {
 struct Gen<'a> {
     prefix: &'a str,
     globals: HashSet<&'a str>,
+    /// Конструкторы текущего модуля (остальные — из prelude).
+    ctors: HashSet<&'a str>,
     /// Lumo-имя → JS-имя, по вложенным областям.
     scopes: Vec<HashMap<String, String>>,
     /// Сколько раз имя уже связано в текущей функции верхнего уровня.
@@ -151,9 +154,11 @@ struct Gen<'a> {
 impl<'a> Gen<'a> {
     fn new(prefix: &'a str, module: &'a typed::Module) -> Self {
         let globals = module.globals.iter().map(|(n, _)| n.as_str()).collect();
+        let ctors = module.ctors.iter().map(|(n, _)| n.as_str()).collect();
         Gen {
             prefix,
             globals,
+            ctors,
             scopes: Vec::new(),
             used: HashMap::new(),
             temps: 0,
@@ -173,6 +178,26 @@ impl<'a> Gen<'a> {
             "function {name}({}) {{\n{body}}}",
             params.join(", ")
         );
+    }
+
+    /// Конструкторы типа: с полями — функция, без полей — общий объект.
+    fn type_decl(&mut self, t: &TypeDecl) {
+        for v in &t.variants {
+            let name = mangle(self.prefix, &v.name);
+            let tag = js_string(&v.name);
+            if v.fields.is_empty() {
+                let _ = writeln!(self.out, "const {name} = {{ $: {tag} }};");
+            } else {
+                let params: Vec<String> = (0..v.fields.len()).map(|i| format!("_{i}")).collect();
+                let fields: Vec<String> = params.iter().map(|p| format!("{p}: {p}")).collect();
+                let _ = writeln!(
+                    self.out,
+                    "function {name}({}) {{ return {{ $: {tag}, {} }}; }}",
+                    params.join(", "),
+                    fields.join(", ")
+                );
+            }
+        }
     }
 
     fn external(&mut self, e: &ExternalDecl) {
@@ -288,6 +313,13 @@ impl<'a> Gen<'a> {
             ExprKind::Str(s) => js_string(s),
             ExprKind::Bool(b) => b.to_string(),
             ExprKind::Var(name) => self.var(name),
+            ExprKind::Ctor(name) => {
+                if self.ctors.contains(name.as_str()) {
+                    mangle(self.prefix, name)
+                } else {
+                    mangle("prelude", name)
+                }
+            }
             ExprKind::ModuleAccess { module, name } => mangle(module, name),
             ExprKind::Unary { op, expr } => {
                 let x = self.expr(expr);

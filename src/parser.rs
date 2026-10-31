@@ -1,6 +1,6 @@
 use crate::ast::{
     BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Module, Param, Pattern, PatternKind, Stmt,
-    TypeExpr, UnOp,
+    TypeDecl, TypeExpr, UnOp, Variant,
 };
 use crate::diagnostics::{Diag, Span};
 use crate::lexer::{Tok, Token};
@@ -86,10 +86,77 @@ impl Parser {
         match self.peek() {
             Tok::Fn => Ok(Item::Fn(self.fn_decl()?)),
             Tok::At => Ok(Item::External(self.external()?)),
+            Tok::Type => Ok(Item::Type(self.type_decl()?)),
             _ => Err(Diag::error(
                 self.span(),
-                "ожидалось объявление: fn или @external",
+                "ожидалось объявление: fn, type или @external",
             )),
+        }
+    }
+
+    fn type_decl(&mut self) -> PResult<TypeDecl> {
+        let start = self.expect(&Tok::Type, "type")?;
+        let (name, _) = self.upper()?;
+        let mut params = Vec::new();
+        if self.eat(&Tok::LParen) {
+            while !self.at(&Tok::RParen) {
+                params.push(self.ident()?.0);
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect(&Tok::RParen, ")")?;
+        }
+        self.expect(&Tok::LBrace, "{")?;
+        let mut variants = Vec::new();
+        loop {
+            while self.eat(&Tok::Newline) || self.eat(&Tok::Semi) {}
+            if self.at(&Tok::RBrace) {
+                break;
+            }
+            let (vname, vspan) = self.upper()?;
+            let mut fields = Vec::new();
+            let mut end = vspan;
+            if self.eat(&Tok::LParen) {
+                while !self.at(&Tok::RParen) {
+                    fields.push(self.type_expr()?);
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                end = self.expect(&Tok::RParen, ")")?;
+            }
+            variants.push(Variant {
+                name: vname,
+                fields,
+                span: vspan.to(end),
+            });
+            if !matches!(self.peek(), Tok::Newline | Tok::Semi | Tok::RBrace) {
+                return Err(Diag::error(self.span(), "ожидался перевод строки или `}`"));
+            }
+        }
+        let end = self.expect(&Tok::RBrace, "}")?;
+        if variants.is_empty() {
+            return Err(Diag::error(
+                start.to(end),
+                "у типа должен быть хотя бы один вариант",
+            ));
+        }
+        Ok(TypeDecl {
+            name,
+            params,
+            variants,
+            span: start.to(end),
+        })
+    }
+
+    fn upper(&mut self) -> PResult<(String, Span)> {
+        match self.peek().clone() {
+            Tok::Upper(name) => {
+                let span = self.advance().span;
+                Ok((name, span))
+            }
+            _ => Err(Diag::error(self.span(), "ожидалось имя с заглавной буквы")),
         }
     }
 
@@ -423,6 +490,7 @@ impl Parser {
             Tok::True => ExprKind::Bool(true),
             Tok::False => ExprKind::Bool(false),
             Tok::Ident(name) => ExprKind::Var(name),
+            Tok::Upper(name) => ExprKind::Ctor(name),
             Tok::LParen => {
                 let inner = self.expr()?;
                 self.expect(&Tok::RParen, ")")?;
@@ -757,7 +825,35 @@ mod tests {
     fn recovery_always_makes_progress() {
         let errs = module_errs("fn a() { 1 }\ntype T\nfn b() { 2 }");
         assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].message.contains("ожидалось `{`"), "{errs:?}");
+        let errs = module_errs("fn a() { 1 }\nlet x\nfn b() { 2 }");
+        assert_eq!(errs.len(), 1, "{errs:?}");
         assert!(errs[0].message.contains("ожидалось объявление"));
+    }
+
+    #[test]
+    fn type_declarations() {
+        let m = module("type Option(a) {\n  Some(a)\n  None\n}\n\ntype Shape { Circle(Float); Rect(Float, Float) }");
+        let Item::Type(t) = &m.items[0] else {
+            panic!("ожидался тип")
+        };
+        assert_eq!(t.name, "Option");
+        assert_eq!(t.params, vec!["a".to_string()]);
+        let variants: Vec<(&str, usize)> = t
+            .variants
+            .iter()
+            .map(|v| (v.name.as_str(), v.fields.len()))
+            .collect();
+        assert_eq!(variants, vec![("Some", 1), ("None", 0)]);
+        let Item::Type(s) = &m.items[1] else {
+            panic!("ожидался тип")
+        };
+        assert_eq!(s.variants.len(), 2);
+        assert!(module_errs("type Empty {}")[0]
+            .message
+            .contains("хотя бы один вариант"));
+        assert_eq!(p("Some(1)"), "(call Some 1)");
+        assert_eq!(p("None"), "None");
     }
 
     #[test]

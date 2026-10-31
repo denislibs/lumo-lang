@@ -43,6 +43,11 @@ pub fn load_stdlib() -> Stdlib {
     for &(name, file, src) in STDLIB {
         let module = frontend(file, src, &env)
             .unwrap_or_else(|f| panic!("ошибка в stdlib:\n{}", f.render(false)));
+        // типы и конструкторы prelude видны программе без префикса
+        if name == "prelude" {
+            env.types.extend(module.types.iter().cloned());
+            env.ctors.extend(module.ctors.iter().cloned());
+        }
         let target = if name == "prelude" {
             &mut env.values
         } else {

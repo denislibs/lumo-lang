@@ -9,6 +9,7 @@ pub struct Module {
 pub enum Item {
     Fn(FnDecl),
     External(ExternalDecl),
+    Type(TypeDecl),
 }
 
 impl Item {
@@ -16,8 +17,25 @@ impl Item {
         match self {
             Item::Fn(f) => &f.name,
             Item::External(e) => &e.name,
+            Item::Type(t) => &t.name,
         }
     }
+}
+
+/// `type Name(a, b) { Variant(T1, T2) ... }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeDecl {
+    pub name: String,
+    pub params: Vec<String>,
+    pub variants: Vec<Variant>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Variant {
+    pub name: String,
+    pub fields: Vec<TypeExpr>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,6 +116,8 @@ pub enum ExprKind {
     Str(String),
     Bool(bool),
     Var(String),
+    /// Конструктор как значение: `Some`, `None`; `Some(1)` — вызов.
+    Ctor(String),
     /// `int.to_string`
     ModuleAccess {
         module: String,

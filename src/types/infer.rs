@@ -5,7 +5,7 @@ use crate::diagnostics::{Diag, Span};
 use crate::typed;
 
 use super::deps::{free_names, scc};
-use super::env::Env;
+use super::env::{CtorInfo, Env, TypeInfo};
 use super::ty::{display, Scheme, Type};
 use super::unify::{Subst, UnifyError};
 
@@ -28,6 +28,7 @@ pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec
         let span = match item {
             Item::Fn(f) => f.span,
             Item::External(e) => e.span,
+            Item::Type(t) => t.span,
         };
         if !seen.insert(item.name()) {
             c.diags.push(Diag::error(
@@ -36,6 +37,15 @@ pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec
             ));
         }
     }
+    let type_decls: Vec<&ast::TypeDecl> = module
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Type(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    let (types, ctors) = c.declare_types(&type_decls);
     for item in &module.items {
         if let Item::External(e) = item {
             let scheme = c.external(e);
@@ -47,7 +57,7 @@ pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec
         .iter()
         .filter_map(|i| match i {
             Item::Fn(f) => Some(f),
-            Item::External(_) => None,
+            _ => None,
         })
         .collect();
     let index: HashMap<&str, usize> = fns
@@ -77,6 +87,7 @@ pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec
     let globals = module
         .items
         .iter()
+        .filter(|i| !matches!(i, Item::Type(_)))
         .map(|i| (i.name().to_string(), c.env.values[i.name()].clone()))
         .collect();
     // группы проверяются в порядке зависимостей — выдаём ошибки в порядке исходника
@@ -84,8 +95,13 @@ pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec
     c.finish(typed::Module {
         ast: module,
         globals,
+        types,
+        ctors,
     })
 }
+
+/// Типы и конструкторы модуля в порядке объявления.
+type Declared = (Vec<(String, TypeInfo)>, Vec<(String, CtorInfo)>);
 
 struct Checker {
     env: Env,
@@ -186,6 +202,16 @@ impl Checker {
             ExprKind::Str(_) => Type::string(),
             ExprKind::Bool(_) => Type::bool(),
             ExprKind::Var(name) => self.lookup(name, e.span),
+            ExprKind::Ctor(name) => match self.env.ctors.get(name).cloned() {
+                Some(info) => self.subst.instantiate(&info.scheme, self.level),
+                None => {
+                    self.diags.push(Diag::error(
+                        e.span,
+                        format!("неизвестный конструктор `{name}`"),
+                    ));
+                    self.subst.fresh(self.level)
+                }
+            },
             ExprKind::ModuleAccess { module, name } => self.module_access(module, name, e.span),
             ExprKind::Unary { op, expr } => {
                 let expected = match op {
@@ -402,9 +428,94 @@ impl Checker {
         }
     }
 
+    /// Регистрирует типы модуля (сначала имена — ради рекурсивных типов), затем конструкторы.
+    fn declare_types(&mut self, decls: &[&ast::TypeDecl]) -> Declared {
+        let mut types = Vec::new();
+        for d in decls {
+            if builtin_arity(&d.name).is_some() {
+                self.diags.push(Diag::error(
+                    d.span,
+                    format!("тип `{}` уже встроен в язык", d.name),
+                ));
+                continue;
+            }
+            let info = TypeInfo {
+                arity: d.params.len(),
+                ctors: d.variants.iter().map(|v| v.name.clone()).collect(),
+            };
+            self.env.types.insert(d.name.clone(), info.clone());
+            types.push((d.name.clone(), info));
+        }
+        let mut ctors = Vec::new();
+        let mut seen = HashSet::new();
+        for d in decls {
+            if builtin_arity(&d.name).is_some() {
+                continue;
+            }
+            self.level = 1;
+            let mut params: HashMap<String, Type> = HashMap::new();
+            for p in &d.params {
+                if params.contains_key(p) {
+                    self.diags.push(Diag::error(
+                        d.span,
+                        format!("параметр типа `{p}` объявлен дважды"),
+                    ));
+                }
+                let v = self.subst.fresh(1);
+                params.insert(p.clone(), v);
+            }
+            let result = Type::Con(
+                d.name.clone(),
+                d.params.iter().map(|p| params[p].clone()).collect(),
+            );
+            for v in &d.variants {
+                if !seen.insert(v.name.clone()) {
+                    self.diags.push(Diag::error(
+                        v.span,
+                        format!("конструктор `{}` уже объявлен в этом модуле", v.name),
+                    ));
+                }
+                let fields: Vec<Type> = v
+                    .fields
+                    .iter()
+                    .map(|f| self.convert_closed(f, &params))
+                    .collect();
+                let ty = if fields.is_empty() {
+                    result.clone()
+                } else {
+                    Type::Fn(fields.clone(), Box::new(result.clone()))
+                };
+                let info = CtorInfo {
+                    type_name: d.name.clone(),
+                    arity: fields.len(),
+                    scheme: self.subst.generalize(&ty, 0),
+                };
+                self.env.ctors.insert(v.name.clone(), info.clone());
+                ctors.push((v.name.clone(), info));
+            }
+            self.level = 0;
+        }
+        (types, ctors)
+    }
+
+    /// Тип поля конструктора: переменные типа — только параметры объявления.
+    fn convert_closed(&mut self, t: &TypeExpr, params: &HashMap<String, Type>) -> Type {
+        let mut vars = params.clone();
+        let ty = self.convert(t, &mut vars);
+        let mut unknown: Vec<&String> = vars.keys().filter(|n| !params.contains_key(*n)).collect();
+        unknown.sort();
+        for name in unknown {
+            self.diags.push(Diag::error(
+                t.span(),
+                format!("неизвестная переменная типа `{name}`: объяви её в параметрах типа"),
+            ));
+        }
+        ty
+    }
+
     /// Число параметров типа или `None`, если такого типа нет.
     fn type_arity(&self, name: &str) -> Option<usize> {
-        builtin_arity(name)
+        builtin_arity(name).or_else(|| self.env.types.get(name).map(|t| t.arity))
     }
 
     /// Аннотация → тип. `vars` — переменные типов, видимые в объявлении.
@@ -788,5 +899,48 @@ mod tests {
         );
         let m = check_src("fn print(x) { x }\nfn f() { print(1) }", &env).unwrap();
         assert_eq!(sig(&m, "f"), "fn() -> Int");
+    }
+    const OPTION: &str = "type Option(a) {\n  Some(a)\n  None\n}\n";
+
+    #[test]
+    fn algebraic_types() {
+        let m = check_src(
+            &format!(
+                "{OPTION}fn f() {{ Some(1) }}\nfn g() {{ None }}\nfn h(x: Option(Int)) {{ x }}"
+            ),
+            &Env::default(),
+        )
+        .unwrap();
+        assert_eq!(sig(&m, "f"), "fn() -> Option(Int)");
+        assert_eq!(sig(&m, "g"), "fn() -> Option(a)");
+        assert_eq!(sig(&m, "h"), "fn(Option(Int)) -> Option(Int)");
+        assert_eq!(m.types.len(), 1);
+        assert_eq!(m.ctors.len(), 2);
+        let names: Vec<&str> = m.globals.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["f", "g", "h"]);
+        let m = check_src(
+            "type Tree(a) {\n  Leaf\n  Node(Tree(a), a, Tree(a))\n}\nfn t() { Node(Leaf, 1, Leaf) }",
+            &Env::default(),
+        )
+        .unwrap();
+        assert_eq!(sig(&m, "t"), "fn() -> Tree(Int)");
+    }
+
+    #[test]
+    fn algebraic_type_errors() {
+        let e = |src: &str| {
+            check_src(src, &Env::default()).unwrap_err()[0]
+                .message
+                .clone()
+        };
+        assert!(e("type Box {\n  Box(a)\n}").contains("неизвестная переменная типа `a`"));
+        assert!(e("type Box(a) {\n  Box(a)\n}\nfn f(x: Box) { x }")
+            .contains("принимает параметров: 1, а передано: 0"));
+        assert!(e("type A {\n  X\n}\ntype B {\n  X\n}").contains("конструктор `X` уже объявлен"));
+        assert!(e("type Int {\n  I\n}").contains("уже встроен"));
+        assert!(e("type P(a, a) {\n  P(a)\n}").contains("параметр типа `a` объявлен дважды"));
+        assert!(e("fn f() { Nope }").contains("неизвестный конструктор `Nope`"));
+        assert!(e(&format!("{OPTION}fn f() {{ Some(1) == Some(\"s\") }}"))
+            .contains("несовпадение типов"));
     }
 }

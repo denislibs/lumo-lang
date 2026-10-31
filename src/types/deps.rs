@@ -26,6 +26,7 @@ fn walk<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, out: &mut HashSet<String>) {
         | ExprKind::Float(_)
         | ExprKind::Str(_)
         | ExprKind::Bool(_)
+        | ExprKind::Ctor(_)
         | ExprKind::ModuleAccess { .. } => {}
         ExprKind::Unary { expr, .. } => walk(expr, bound, out),
         ExprKind::Binary { lhs, rhs, .. } => {

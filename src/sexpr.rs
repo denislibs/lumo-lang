@@ -9,6 +9,7 @@ pub fn expr(e: &Expr) -> String {
         ExprKind::Str(s) => format!("{s:?}"),
         ExprKind::Bool(b) => b.to_string(),
         ExprKind::Var(name) => name.clone(),
+        ExprKind::Ctor(name) => name.clone(),
         ExprKind::ModuleAccess { module, name } => format!("{module}.{name}"),
         ExprKind::Unary { op, expr: inner } => format!("({} {})", op.symbol(), expr(inner)),
         ExprKind::Binary { op, lhs, rhs } => {
