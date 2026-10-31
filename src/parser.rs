@@ -48,10 +48,15 @@ impl Parser {
             if self.at(&Tok::Eof) {
                 break;
             }
+            let start = self.pos;
             match self.item() {
                 Ok(item) => items.push(item),
                 Err(d) => {
                     self.diags.push(d);
+                    // Гарантия прогресса: если ошибка не съела ни одного токена, съедаем один.
+                    if self.pos == start {
+                        self.advance();
+                    }
                     self.synchronize();
                 }
             }
@@ -59,9 +64,8 @@ impl Parser {
         Module { items }
     }
 
-    /// Гарантированно съедает токен, затем пропускает до начала следующего объявления на новой строке.
+    /// Пропускает токены до начала следующего объявления на новой строке.
     fn synchronize(&mut self) {
-        self.advance();
         while !self.at(&Tok::Eof) {
             let after_newline = self.pos > 0 && self.toks[self.pos - 1].tok == Tok::Newline;
             if after_newline && matches!(self.peek(), Tok::Fn | Tok::At | Tok::Type) {
@@ -549,5 +553,11 @@ mod tests {
         let errs = module_errs("fn a() { 1 }\ntype T\nfn b() { 2 }");
         assert_eq!(errs.len(), 1, "{errs:?}");
         assert!(errs[0].message.contains("ожидалось объявление"));
+    }
+
+    #[test]
+    fn recovery_keeps_boundary_after_consumed_newline() {
+        let errs = module_errs("fn a() { if\nfn b() { ) }");
+        assert_eq!(errs.len(), 2, "{errs:?}");
     }
 }
