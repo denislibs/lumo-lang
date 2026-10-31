@@ -1514,10 +1514,15 @@ pub fn parse(tokens: Vec<Token>) -> Result<Module, Vec<Diag>> {
             if self.at(&Tok::Eof) {
                 break;
             }
+            let start = self.pos;
             match self.item() {
                 Ok(item) => items.push(item),
                 Err(d) => {
                     self.diags.push(d);
+                    // Гарантия прогресса: ошибка на первом же токене (например, `type` в M1).
+                    if self.pos == start {
+                        self.advance();
+                    }
                     self.synchronize();
                 }
             }
