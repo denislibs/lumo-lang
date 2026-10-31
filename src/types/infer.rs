@@ -475,6 +475,10 @@ impl Checker {
 
     /// Регистрирует типы модуля (сначала имена — ради рекурсивных типов), затем конструкторы.
     fn declare_types(&mut self, decls: &[&ast::TypeDecl]) -> Declared {
+        // имена, пришедшие из окружения (prelude): модуль не вправе их переопределять
+        let incoming_types: HashSet<String> = self.env.types.keys().cloned().collect();
+        let incoming_ctors: HashSet<String> = self.env.ctors.keys().cloned().collect();
+        let mut rejected: HashSet<&str> = HashSet::new();
         let mut types = Vec::new();
         for d in decls {
             if builtin_arity(&d.name).is_some() {
@@ -482,6 +486,14 @@ impl Checker {
                     d.span,
                     format!("тип `{}` уже встроен в язык", d.name),
                 ));
+                continue;
+            }
+            if incoming_types.contains(&d.name) {
+                self.diags.push(Diag::error(
+                    d.span,
+                    format!("тип `{}` уже объявлен в prelude", d.name),
+                ));
+                rejected.insert(&d.name);
                 continue;
             }
             let info = TypeInfo {
@@ -494,7 +506,7 @@ impl Checker {
         let mut ctors = Vec::new();
         let mut seen = HashSet::new();
         for d in decls {
-            if builtin_arity(&d.name).is_some() {
+            if builtin_arity(&d.name).is_some() || rejected.contains(d.name.as_str()) {
                 continue;
             }
             self.level = 1;
@@ -519,6 +531,13 @@ impl Checker {
                         v.span,
                         format!("конструктор `{}` уже объявлен в этом модуле", v.name),
                     ));
+                }
+                if incoming_ctors.contains(&v.name) {
+                    self.diags.push(Diag::error(
+                        v.span,
+                        format!("конструктор `{}` уже объявлен в prelude", v.name),
+                    ));
+                    continue;
                 }
                 let fields: Vec<Type> = v
                     .fields
@@ -1063,6 +1082,22 @@ mod tests {
             t("match 1 {\n 0 -> \"ноль\"\n _ -> \"другое\"\n}"),
             "String"
         );
+    }
+
+    #[test]
+    fn module_types_cannot_shadow_imported_ones() {
+        // окружение, в котором `Option` уже есть (как будет в prelude)
+        let m = check_src(OPTION, &Env::default()).unwrap();
+        let mut env = Env::default();
+        env.types.extend(m.types.iter().cloned());
+        env.ctors.extend(m.ctors.iter().cloned());
+        let e = |src: &str| check_src(src, &env).unwrap_err()[0].message.clone();
+        assert!(e("type Option(a) { X(a) }").contains("тип `Option` уже объявлен в prelude"));
+        assert!(
+            e("type Maybe(a) { Some(a) }").contains("конструктор `Some` уже объявлен в prelude")
+        );
+        // неконфликтующие имена по-прежнему работают
+        assert!(check_src("type Maybe(a) { Just(a) }", &env).is_ok());
     }
 
     #[test]
