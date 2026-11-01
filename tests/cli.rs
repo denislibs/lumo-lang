@@ -113,3 +113,33 @@ fn comparing_functions_fails_at_runtime() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("функции нельзя сравнивать"));
 }
+
+#[test]
+fn comparing_lists_of_functions_fails_at_runtime() {
+    let file = write_tmp(
+        "fn_eq.lumo",
+        "fn main() {\n  print(if [fn(x) { x }] == [fn(x) { x }] { \"a\" } else { \"b\" })\n}\n",
+    );
+    let out = lumo()
+        .args(["run", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("функции нельзя сравнивать"));
+}
+
+#[test]
+fn check_reports_non_exhaustive_match() {
+    let file = write_tmp(
+        "partial.lumo",
+        "fn main() {\n  let n = 2\n  match n > 1 {\n    true -> print(\"да\")\n  }\n}\n",
+    );
+    let out = lumo()
+        .args(["check", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("не обработан случай `false`"));
+    assert!(stderr.contains("match n > 1"), "{stderr}");
+}

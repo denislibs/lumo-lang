@@ -1,0 +1,64 @@
+type Option(a) {
+  Some(a)
+  None
+}
+
+fn find(xs, pred) {
+  match xs {
+    [] -> None
+    [x, ..rest] -> if pred(x) { Some(x) } else { find(rest, pred) }
+  }
+}
+
+fn describe(n) {
+  match n {
+    0 -> "ноль"
+    -1 -> "минус один"
+    _ -> "другое"
+  }
+}
+
+fn sum(xs) {
+  match xs {
+    [] -> 0
+    [x, ..rest] -> x + sum(rest)
+  }
+}
+
+fn shape(xs) {
+  match xs {
+    [] -> "пусто"
+    [_] -> "один"
+    [a, b] -> "два: " <> a <> b
+    [a, ..] -> "много, первый " <> a
+  }
+}
+
+fn label(o) {
+  match o {
+    Some(#(name, true)) -> name <> " (вкл)"
+    Some(#(name, false)) -> name <> " (выкл)"
+    None -> "нет"
+  }
+}
+
+fn main() {
+  debug(find([1, 4, 9, 16], fn(n) { n > 5 }))
+  debug(find([1, 2], fn(n) { n > 5 }))
+  print(describe(0))
+  print(describe(-1))
+  print(describe(7))
+  print(int.to_string(sum([1, 2, 3, 4])))
+  print(shape([]))
+  print(shape(["a"]))
+  print(shape(["a", "b"]))
+  print(shape(["a", "b", "c"]))
+  print(label(Some(#("свет", true))))
+  print(label(Some(#("звук", false))))
+  print(label(None))
+  let message = match Some(3) {
+    Some(n) -> "есть " <> int.to_string(n)
+    None -> "пусто"
+  }
+  print(message)
+}

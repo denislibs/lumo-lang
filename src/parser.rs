@@ -1,5 +1,6 @@
 use crate::ast::{
-    BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Module, Param, Stmt, TypeExpr, UnOp,
+    Arm, BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Module, Param, Pattern, PatternKind,
+    Stmt, TypeDecl, TypeExpr, UnOp, Variant,
 };
 use crate::diagnostics::{Diag, Span};
 use crate::lexer::{Tok, Token};
@@ -85,10 +86,77 @@ impl Parser {
         match self.peek() {
             Tok::Fn => Ok(Item::Fn(self.fn_decl()?)),
             Tok::At => Ok(Item::External(self.external()?)),
+            Tok::Type => Ok(Item::Type(self.type_decl()?)),
             _ => Err(Diag::error(
                 self.span(),
-                "ожидалось объявление: fn или @external",
+                "ожидалось объявление: fn, type или @external",
             )),
+        }
+    }
+
+    fn type_decl(&mut self) -> PResult<TypeDecl> {
+        let start = self.expect(&Tok::Type, "type")?;
+        let (name, _) = self.upper()?;
+        let mut params = Vec::new();
+        if self.eat(&Tok::LParen) {
+            while !self.at(&Tok::RParen) {
+                params.push(self.ident()?.0);
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect(&Tok::RParen, ")")?;
+        }
+        self.expect(&Tok::LBrace, "{")?;
+        let mut variants = Vec::new();
+        loop {
+            while self.eat(&Tok::Newline) || self.eat(&Tok::Semi) {}
+            if self.at(&Tok::RBrace) {
+                break;
+            }
+            let (vname, vspan) = self.upper()?;
+            let mut fields = Vec::new();
+            let mut end = vspan;
+            if self.eat(&Tok::LParen) {
+                while !self.at(&Tok::RParen) {
+                    fields.push(self.type_expr()?);
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                end = self.expect(&Tok::RParen, ")")?;
+            }
+            variants.push(Variant {
+                name: vname,
+                fields,
+                span: vspan.to(end),
+            });
+            if !matches!(self.peek(), Tok::Newline | Tok::Semi | Tok::RBrace) {
+                return Err(Diag::error(self.span(), "ожидался перевод строки или `}`"));
+            }
+        }
+        let end = self.expect(&Tok::RBrace, "}")?;
+        if variants.is_empty() {
+            return Err(Diag::error(
+                start.to(end),
+                "у типа должен быть хотя бы один вариант",
+            ));
+        }
+        Ok(TypeDecl {
+            name,
+            params,
+            variants,
+            span: start.to(end),
+        })
+    }
+
+    fn upper(&mut self) -> PResult<(String, Span)> {
+        match self.peek().clone() {
+            Tok::Upper(name) => {
+                let span = self.advance().span;
+                Ok((name, span))
+            }
+            _ => Err(Diag::error(self.span(), "ожидалось имя с заглавной буквы")),
         }
     }
 
@@ -259,6 +327,21 @@ impl Parser {
                     span,
                 })
             }
+            Tok::Hash => {
+                self.expect(&Tok::LParen, "(")?;
+                let mut elems = Vec::new();
+                while !self.at(&Tok::RParen) {
+                    elems.push(self.type_expr()?);
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                let end = self.expect(&Tok::RParen, ")")?;
+                Ok(TypeExpr::Tuple {
+                    elems,
+                    span: t.span.to(end),
+                })
+            }
             _ => Err(Diag::error(t.span, "ожидался тип")),
         }
     }
@@ -288,7 +371,7 @@ impl Parser {
             return Ok(Stmt::Expr(self.expr()?));
         }
         let start = self.advance().span;
-        let (name, _) = self.ident()?;
+        let pattern = self.pattern()?;
         let ty = if self.eat(&Tok::Colon) {
             Some(self.type_expr()?)
         } else {
@@ -298,7 +381,7 @@ impl Parser {
         let value = self.expr()?;
         let span = start.to(value.span);
         Ok(Stmt::Let {
-            name,
+            pattern,
             ty,
             value,
             span,
@@ -407,6 +490,7 @@ impl Parser {
             Tok::True => ExprKind::Bool(true),
             Tok::False => ExprKind::Bool(false),
             Tok::Ident(name) => ExprKind::Var(name),
+            Tok::Upper(name) => ExprKind::Ctor(name),
             Tok::LParen => {
                 let inner = self.expr()?;
                 self.expect(&Tok::RParen, ")")?;
@@ -414,9 +498,178 @@ impl Parser {
             }
             Tok::If => return self.if_expr(t.span),
             Tok::Fn => return self.lambda(t.span),
+            Tok::Hash => return self.tuple(t.span),
+            Tok::LBracket => return self.list(t.span),
+            Tok::Match => return self.match_expr(t.span),
             _ => return Err(Diag::error(t.span, "ожидалось выражение")),
         };
         Ok(Expr { kind, span: t.span })
+    }
+
+    /// `[a, b]` или `[a, b, ..rest]` — после `[`.
+    fn list(&mut self, start: Span) -> PResult<Expr> {
+        let mut items = Vec::new();
+        let mut tail = None;
+        while !self.at(&Tok::RBracket) {
+            if self.eat(&Tok::DotDot) {
+                tail = Some(Box::new(self.expr()?));
+                break;
+            }
+            items.push(self.expr()?);
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        let end = self.expect(&Tok::RBracket, "]")?;
+        Ok(Expr {
+            kind: ExprKind::List { items, tail },
+            span: start.to(end),
+        })
+    }
+
+    /// `#(a, b)` — после `#`.
+    fn tuple(&mut self, start: Span) -> PResult<Expr> {
+        self.expect(&Tok::LParen, "(")?;
+        let mut items = Vec::new();
+        while !self.at(&Tok::RParen) {
+            items.push(self.expr()?);
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        let end = self.expect(&Tok::RParen, ")")?;
+        Ok(Expr {
+            kind: ExprKind::Tuple(items),
+            span: start.to(end),
+        })
+    }
+
+    /// `match scrutinee { pattern -> body ... }` — после `match`.
+    fn match_expr(&mut self, start: Span) -> PResult<Expr> {
+        let scrutinee = self.expr()?;
+        self.expect(&Tok::LBrace, "{")?;
+        let mut arms = Vec::new();
+        loop {
+            while self.eat(&Tok::Newline) || self.eat(&Tok::Semi) {}
+            if self.at(&Tok::RBrace) {
+                break;
+            }
+            let pattern = self.pattern()?;
+            self.expect(&Tok::Arrow, "->")?;
+            let body = self.expr()?;
+            let span = pattern.span.to(body.span);
+            arms.push(Arm {
+                pattern,
+                body,
+                span,
+            });
+            if !matches!(self.peek(), Tok::Newline | Tok::Semi | Tok::RBrace) {
+                return Err(Diag::error(self.span(), "ожидался перевод строки или `}`"));
+            }
+        }
+        let end = self.expect(&Tok::RBrace, "}")?;
+        if arms.is_empty() {
+            return Err(Diag::error(
+                start.to(end),
+                "у match должна быть хотя бы одна ветка",
+            ));
+        }
+        Ok(Expr {
+            kind: ExprKind::Match {
+                scrutinee: Box::new(scrutinee),
+                arms,
+            },
+            span: start.to(end),
+        })
+    }
+
+    fn pattern(&mut self) -> PResult<Pattern> {
+        let t = self.advance();
+        let kind = match t.tok {
+            Tok::Ident(name) if name == "_" => PatternKind::Wildcard,
+            Tok::Ident(name) => PatternKind::Var(name),
+            Tok::Hash => {
+                self.expect(&Tok::LParen, "(")?;
+                let items = self.pattern_list(&Tok::RParen)?;
+                let end = self.expect(&Tok::RParen, ")")?;
+                return Ok(Pattern {
+                    kind: PatternKind::Tuple(items),
+                    span: t.span.to(end),
+                });
+            }
+            Tok::Int(n) => PatternKind::Int(n),
+            Tok::Float(f) => PatternKind::Float(f),
+            Tok::Str(s) => PatternKind::Str(s),
+            Tok::True => PatternKind::Bool(true),
+            Tok::False => PatternKind::Bool(false),
+            Tok::Minus => {
+                let n = self.advance();
+                let Tok::Int(v) = n.tok else {
+                    return Err(Diag::error(
+                        n.span,
+                        "после `-` в образце ожидалось целое число",
+                    ));
+                };
+                return Ok(Pattern {
+                    kind: PatternKind::Int(-v),
+                    span: t.span.to(n.span),
+                });
+            }
+            Tok::Upper(name) => {
+                let mut args = Vec::new();
+                let mut end = t.span;
+                if self.eat(&Tok::LParen) {
+                    args = self.pattern_list(&Tok::RParen)?;
+                    end = self.expect(&Tok::RParen, ")")?;
+                }
+                return Ok(Pattern {
+                    kind: PatternKind::Ctor { name, args },
+                    span: t.span.to(end),
+                });
+            }
+            Tok::LBracket => {
+                let mut items = Vec::new();
+                let mut tail = None;
+                while !self.at(&Tok::RBracket) {
+                    if self.at(&Tok::DotDot) {
+                        let dots = self.advance().span;
+                        let rest = if self.at(&Tok::RBracket) {
+                            Pattern {
+                                kind: PatternKind::Wildcard,
+                                span: dots,
+                            }
+                        } else {
+                            self.pattern()?
+                        };
+                        tail = Some(Box::new(rest));
+                        break;
+                    }
+                    items.push(self.pattern()?);
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                let end = self.expect(&Tok::RBracket, "]")?;
+                return Ok(Pattern {
+                    kind: PatternKind::List { items, tail },
+                    span: t.span.to(end),
+                });
+            }
+            _ => return Err(Diag::error(t.span, "ожидался образец")),
+        };
+        Ok(Pattern { kind, span: t.span })
+    }
+
+    /// Образцы через запятую до `close` (сам `close` не съедается).
+    fn pattern_list(&mut self, close: &Tok) -> PResult<Vec<Pattern>> {
+        let mut items = Vec::new();
+        while !self.at(close) {
+            items.push(self.pattern()?);
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        Ok(items)
     }
 
     fn if_expr(&mut self, start: Span) -> PResult<Expr> {
@@ -526,6 +779,14 @@ mod tests {
 
     fn p(src: &str) -> String {
         sexpr::expr(&parse_expr(lex(src).unwrap()).unwrap())
+    }
+
+    #[test]
+    fn list_literals() {
+        assert_eq!(p("[1, 2]"), "(list 1 2)");
+        assert_eq!(p("[]"), "(list)");
+        assert_eq!(p("[x, ..xs]"), "(list x ..xs)");
+        assert_eq!(p("[\n 1,\n 2\n]"), "(list 1 2)");
     }
 
     fn perr(src: &str) -> String {
@@ -662,12 +923,78 @@ mod tests {
     fn recovery_always_makes_progress() {
         let errs = module_errs("fn a() { 1 }\ntype T\nfn b() { 2 }");
         assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].message.contains("ожидалось `{`"), "{errs:?}");
+        let errs = module_errs("fn a() { 1 }\nlet x\nfn b() { 2 }");
+        assert_eq!(errs.len(), 1, "{errs:?}");
         assert!(errs[0].message.contains("ожидалось объявление"));
+    }
+
+    #[test]
+    fn type_declarations() {
+        let m = module("type Option(a) {\n  Some(a)\n  None\n}\n\ntype Shape { Circle(Float); Rect(Float, Float) }");
+        let Item::Type(t) = &m.items[0] else {
+            panic!("ожидался тип")
+        };
+        assert_eq!(t.name, "Option");
+        assert_eq!(t.params, vec!["a".to_string()]);
+        let variants: Vec<(&str, usize)> = t
+            .variants
+            .iter()
+            .map(|v| (v.name.as_str(), v.fields.len()))
+            .collect();
+        assert_eq!(variants, vec![("Some", 1), ("None", 0)]);
+        let Item::Type(s) = &m.items[1] else {
+            panic!("ожидался тип")
+        };
+        assert_eq!(s.variants.len(), 2);
+        assert!(module_errs("type Empty {}")[0]
+            .message
+            .contains("хотя бы один вариант"));
+        assert_eq!(p("Some(1)"), "(call Some 1)");
+        assert_eq!(p("None"), "None");
     }
 
     #[test]
     fn recovery_keeps_boundary_after_consumed_newline() {
         let errs = module_errs("fn a() { if\nfn b() { ) }");
         assert_eq!(errs.len(), 2, "{errs:?}");
+    }
+
+    #[test]
+    fn tuples_and_let_patterns() {
+        assert_eq!(p("#(1, x)"), "(tuple 1 x)");
+        assert_eq!(p("#()"), "(tuple)");
+        assert_eq!(p("{\n let #(a, _) = t\n a\n}"), "(block (let #(a, _) t) a)");
+        assert_eq!(
+            p("{\n let #(a, #(b, c)) = t\n b\n}"),
+            "(block (let #(a, #(b, c)) t) b)"
+        );
+        assert!(perr("{\n let + = x\n x\n}").contains("ожидался образец"));
+    }
+
+    #[test]
+    fn tuple_types() {
+        let m = module("fn f(p: #(Int, fn(a) -> b)) { p }");
+        let Item::Fn(f) = &m.items[0] else {
+            panic!("ожидалась функция")
+        };
+        assert_eq!(
+            sexpr::type_expr(f.params[0].ty.as_ref().unwrap()),
+            "#(Int, fn(a) -> b)"
+        );
+    }
+
+    #[test]
+    fn match_and_patterns() {
+        assert_eq!(
+            p("match x {\n Some(#(a, _)) -> a\n [1, ..rest] -> 2\n -3 -> 4\n \"s\" -> 5\n [] -> 6\n [a, ..] -> 7\n None -> 8\n}"),
+            "(match x (Some(#(a, _)) a) ([1, ..rest] 2) (-3 4) (\"s\" 5) ([] 6) ([a, .._] 7) (None 8))"
+        );
+        assert_eq!(
+            p("match b {\n true -> 1\n false -> 2\n}"),
+            "(match b (true 1) (false 2))"
+        );
+        assert!(perr("match x {}").contains("хотя бы одна ветка"));
+        assert!(perr("match x {\n - a -> 1\n}").contains("после `-`"));
     }
 }

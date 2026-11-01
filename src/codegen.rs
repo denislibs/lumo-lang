@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
-use crate::ast::{BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Stmt, UnOp};
+use crate::ast::{
+    Arm, BinOp, Expr, ExprKind, ExternalDecl, FnDecl, Item, Pattern, PatternKind, Stmt, TypeDecl,
+    UnOp,
+};
 use crate::typed;
 
 const RUNTIME: &str = include_str!("../runtime/lumo.js");
@@ -76,6 +79,7 @@ pub fn emit_program(units: &[(&str, &typed::Module)]) -> String {
             match item {
                 Item::Fn(f) => gen.function(f),
                 Item::External(e) => gen.external(e),
+                Item::Type(t) => gen.type_decl(t),
             }
         }
         out.push_str(&gen.out);
@@ -134,24 +138,46 @@ fn js_op(op: BinOp) -> &'static str {
     }
 }
 
+/// Функция, в которой хвостовой самовызов превращается в переход на новую итерацию цикла.
+struct SelfCall {
+    /// Имя функции в Lumo.
+    name: String,
+    /// Её глобальное JS-имя.
+    js: String,
+    /// Переменные цикла `$p0`, `$p1`, … — по одной на параметр.
+    params: Vec<String>,
+    /// Был ли переписан хотя бы один вызов.
+    used: bool,
+}
+
 struct Gen<'a> {
     prefix: &'a str,
     globals: HashSet<&'a str>,
+    /// Конструкторы текущего модуля (остальные — из prelude).
+    ctors: HashSet<&'a str>,
     /// Lumo-имя → JS-имя, по вложенным областям.
     scopes: Vec<HashMap<String, String>>,
     /// Сколько раз имя уже связано в текущей функции верхнего уровня.
     used: HashMap<String, u32>,
+    /// Счётчик служебных имён `$t1`, `$t2`, …
+    temps: u32,
+    /// Текущая функция верхнего уровня; `None` внутри вложенных JS-функций.
+    self_call: Option<SelfCall>,
     out: String,
 }
 
 impl<'a> Gen<'a> {
     fn new(prefix: &'a str, module: &'a typed::Module) -> Self {
         let globals = module.globals.iter().map(|(n, _)| n.as_str()).collect();
+        let ctors = module.ctors.iter().map(|(n, _)| n.as_str()).collect();
         Gen {
             prefix,
             globals,
+            ctors,
             scopes: Vec::new(),
             used: HashMap::new(),
+            temps: 0,
+            self_call: None,
             out: String::new(),
         }
     }
@@ -160,14 +186,56 @@ impl<'a> Gen<'a> {
         self.used = self.globals.iter().map(|g| (g.to_string(), 1)).collect();
         self.scopes.push(HashMap::new());
         let params: Vec<String> = f.params.iter().map(|p| self.bind(&p.name)).collect();
-        let body = self.tail(&f.body);
-        self.scopes.pop();
         let name = mangle(self.prefix, &f.name);
-        let _ = writeln!(
-            self.out,
-            "function {name}({}) {{\n{body}}}",
-            params.join(", ")
-        );
+        let loop_vars: Vec<String> = (0..params.len()).map(|i| format!("$p{i}")).collect();
+        self.self_call = Some(SelfCall {
+            name: f.name.clone(),
+            js: name.clone(),
+            params: loop_vars.clone(),
+            used: false,
+        });
+        let body = self.tail(&f.body);
+        let looped = self.self_call.take().is_some_and(|s| s.used);
+        self.scopes.pop();
+        if looped {
+            // копии в `const` на каждой итерации: замыкания видят значения своей итерации
+            let copies: String = params
+                .iter()
+                .zip(&loop_vars)
+                .map(|(p, v)| format!("const {p} = {v};\n"))
+                .collect();
+            let _ = writeln!(
+                self.out,
+                "function {name}({}) {{\nwhile (true) {{\n{copies}{body}}}\n}}",
+                loop_vars.join(", ")
+            );
+        } else {
+            let _ = writeln!(
+                self.out,
+                "function {name}({}) {{\n{body}}}",
+                params.join(", ")
+            );
+        }
+    }
+
+    /// Конструкторы типа: с полями — функция, без полей — общий объект.
+    fn type_decl(&mut self, t: &TypeDecl) {
+        for v in &t.variants {
+            let name = mangle(self.prefix, &v.name);
+            let tag = js_string(&v.name);
+            if v.fields.is_empty() {
+                let _ = writeln!(self.out, "const {name} = {{ $: {tag} }};");
+            } else {
+                let params: Vec<String> = (0..v.fields.len()).map(|i| format!("_{i}")).collect();
+                let fields: Vec<String> = params.iter().map(|p| format!("{p}: {p}")).collect();
+                let _ = writeln!(
+                    self.out,
+                    "function {name}({}) {{ return {{ $: {tag}, {} }}; }}",
+                    params.join(", "),
+                    fields.join(", ")
+                );
+            }
+        }
     }
 
     fn external(&mut self, e: &ExternalDecl) {
@@ -197,6 +265,63 @@ impl<'a> Gen<'a> {
         js
     }
 
+    /// Свежее служебное имя (`$` не встречается в именах Lumo).
+    fn temp(&mut self) -> String {
+        self.temps += 1;
+        format!("$t{}", self.temps)
+    }
+
+    /// `const` для каждого имени из образца `let`; значение вычисляется один раз.
+    fn bind_let(&mut self, pattern: &Pattern, value: String) -> String {
+        if let PatternKind::Var(name) = &pattern.kind {
+            let js = self.bind(name);
+            return format!("const {js} = {value};\n");
+        }
+        let tmp = self.temp();
+        let mut out = format!("const {tmp} = {value};\n");
+        let mut conds = Vec::new();
+        pattern_conds(pattern, &tmp, &mut conds);
+        if !conds.is_empty() {
+            let _ = writeln!(
+                out,
+                "if (!({})) throw new Error(\"Lumo: образец let не подошёл\");",
+                conds.join(" && ")
+            );
+        }
+        for (name, access) in pattern_accesses(pattern, &tmp) {
+            let js = self.bind(&name);
+            let _ = writeln!(out, "const {js} = {access};");
+        }
+        out
+    }
+
+    /// Цепочка `if` по веткам `match`; каждая ветка заканчивается `return`.
+    fn match_tail(&mut self, scrutinee: &Expr, arms: &[Arm]) -> String {
+        let tmp = self.temp();
+        let value = self.expr(scrutinee);
+        let mut out = format!("const {tmp} = {value};\n");
+        for arm in arms {
+            let mut conds = Vec::new();
+            pattern_conds(&arm.pattern, &tmp, &mut conds);
+            self.scopes.push(HashMap::new());
+            let mut body = String::new();
+            for (name, access) in pattern_accesses(&arm.pattern, &tmp) {
+                let js = self.bind(&name);
+                let _ = writeln!(body, "const {js} = {access};");
+            }
+            body.push_str(&self.tail(&arm.body));
+            self.scopes.pop();
+            if conds.is_empty() {
+                // ветка подходит всегда: остальные недостижимы
+                let _ = writeln!(out, "{{\n{body}}}");
+                return out;
+            }
+            let _ = writeln!(out, "if ({}) {{\n{body}}}", conds.join(" && "));
+        }
+        out.push_str("throw new Error(\"Lumo: match не покрыл значение\");\n");
+        out
+    }
+
     fn var(&self, name: &str) -> String {
         for scope in self.scopes.iter().rev() {
             if let Some(js) = scope.get(name) {
@@ -210,6 +335,23 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Хвостовой вызов текущей функции по её глобальному имени (не затенённому локальным).
+    fn is_self_call(&self, callee: &Expr, argc: usize) -> bool {
+        let Some(call) = &self.self_call else {
+            return false;
+        };
+        matches!(&callee.kind, ExprKind::Var(name)
+            if *name == call.name && argc == call.params.len() && self.var(name) == call.js)
+    }
+
+    /// Код во вложенной JS-функции: `continue` внешнего цикла там недоступен.
+    fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = self.self_call.take();
+        let out = f(self);
+        self.self_call = saved;
+        out
+    }
+
     /// Операторы JS, которые вычисляют `e` и делают `return`.
     fn tail(&mut self, e: &Expr) -> String {
         match &e.kind {
@@ -219,10 +361,9 @@ impl<'a> Gen<'a> {
                 for (i, s) in stmts.iter().enumerate() {
                     let is_last = i + 1 == stmts.len();
                     match s {
-                        Stmt::Let { name, value, .. } => {
+                        Stmt::Let { pattern, value, .. } => {
                             let v = self.expr(value);
-                            let js = self.bind(name);
-                            let _ = writeln!(out, "const {js} = {v};");
+                            out.push_str(&self.bind_let(pattern, v));
                         }
                         Stmt::Expr(e) if is_last => out.push_str(&self.tail(e)),
                         Stmt::Expr(e) => {
@@ -252,6 +393,20 @@ impl<'a> Gen<'a> {
                     None => format!("if ({c}) {{\n{then}}}\nreturn undefined;\n"),
                 }
             }
+            ExprKind::Call { callee, args } if self.is_self_call(callee, args.len()) => {
+                let vals: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
+                let call = self.self_call.as_mut().expect("проверено в is_self_call");
+                call.used = true;
+                let mut out: String = call
+                    .params
+                    .iter()
+                    .zip(&vals)
+                    .map(|(p, v)| format!("{p} = {v};\n"))
+                    .collect();
+                out.push_str("continue;\n");
+                out
+            }
+            ExprKind::Match { scrutinee, arms } => self.match_tail(scrutinee, arms),
             _ => format!("return {};\n", self.expr(e)),
         }
     }
@@ -263,6 +418,13 @@ impl<'a> Gen<'a> {
             ExprKind::Str(s) => js_string(s),
             ExprKind::Bool(b) => b.to_string(),
             ExprKind::Var(name) => self.var(name),
+            ExprKind::Ctor(name) => {
+                if self.ctors.contains(name.as_str()) {
+                    mangle(self.prefix, name)
+                } else {
+                    mangle("prelude", name)
+                }
+            }
             ExprKind::ModuleAccess { module, name } => mangle(module, name),
             ExprKind::Unary { op, expr } => {
                 let x = self.expr(expr);
@@ -287,13 +449,13 @@ impl<'a> Gen<'a> {
                 let args: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
                 format!("{f}({})", args.join(", "))
             }
-            ExprKind::Lambda { params, body } => {
-                self.scopes.push(HashMap::new());
-                let ps: Vec<String> = params.iter().map(|p| self.bind(&p.name)).collect();
-                let b = self.tail(body);
-                self.scopes.pop();
+            ExprKind::Lambda { params, body } => self.nested(|g| {
+                g.scopes.push(HashMap::new());
+                let ps: Vec<String> = params.iter().map(|p| g.bind(&p.name)).collect();
+                let b = g.tail(body);
+                g.scopes.pop();
                 format!("(({}) => {{\n{b}}})", ps.join(", "))
-            }
+            }),
             ExprKind::If {
                 cond,
                 then_branch,
@@ -307,10 +469,129 @@ impl<'a> Gen<'a> {
                 };
                 format!("({c} ? {t} : {other})")
             }
+            ExprKind::List { items, tail } => {
+                let tail = match tail {
+                    Some(t) => self.expr(t),
+                    None => "null".to_string(),
+                };
+                if items.is_empty() {
+                    tail
+                } else {
+                    let items: Vec<String> = items.iter().map(|i| self.expr(i)).collect();
+                    format!("$list([{}], {tail})", items.join(", "))
+                }
+            }
+            ExprKind::Tuple(items) => {
+                let items: Vec<String> = items.iter().map(|i| self.expr(i)).collect();
+                format!("[{}]", items.join(", "))
+            }
+            ExprKind::Match { .. } => self.nested(|g| format!("(() => {{\n{}}})()", g.tail(e))),
             ExprKind::Block(stmts) => match stmts.as_slice() {
                 [Stmt::Expr(only)] => self.expr(only),
-                _ => format!("(() => {{\n{}}})()", self.tail(e)),
+                _ => self.nested(|g| format!("(() => {{\n{}}})()", g.tail(e))),
             },
         }
+    }
+}
+
+/// Пары (имя Lumo, JS-путь к значению) для имён, которые связывает образец.
+fn pattern_accesses(p: &Pattern, access: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    collect_accesses(p, access.to_string(), &mut out);
+    out
+}
+
+fn collect_accesses(p: &Pattern, access: String, out: &mut Vec<(String, String)>) {
+    match &p.kind {
+        PatternKind::Wildcard
+        | PatternKind::Int(_)
+        | PatternKind::Float(_)
+        | PatternKind::Str(_)
+        | PatternKind::Bool(_) => {}
+        PatternKind::Var(name) => out.push((name.clone(), access)),
+        PatternKind::Tuple(items) => {
+            for (i, item) in items.iter().enumerate() {
+                collect_accesses(item, format!("{access}[{i}]"), out);
+            }
+        }
+        PatternKind::Ctor { args, .. } => {
+            for (i, a) in args.iter().enumerate() {
+                collect_accesses(a, format!("{access}._{i}"), out);
+            }
+        }
+        PatternKind::List { items, tail } => {
+            let mut cell = access;
+            for item in items {
+                collect_accesses(item, format!("{cell}.h"), out);
+                cell = format!("{cell}.t");
+            }
+            if let Some(t) = tail {
+                collect_accesses(t, cell, out);
+            }
+        }
+    }
+}
+
+/// Условия JS, при которых значение по пути `access` подходит под образец.
+fn pattern_conds(p: &Pattern, access: &str, out: &mut Vec<String>) {
+    match &p.kind {
+        PatternKind::Wildcard | PatternKind::Var(_) => {}
+        PatternKind::Int(n) => out.push(format!("{access} === {n}")),
+        PatternKind::Float(f) => out.push(format!("{access} === {f:?}")),
+        PatternKind::Str(s) => out.push(format!("{access} === {}", js_string(s))),
+        PatternKind::Bool(b) => out.push(format!("{access} === {b}")),
+        PatternKind::Tuple(items) => {
+            for (i, item) in items.iter().enumerate() {
+                pattern_conds(item, &format!("{access}[{i}]"), out);
+            }
+        }
+        PatternKind::Ctor { name, args } => {
+            out.push(format!("{access}.$ === {}", js_string(name)));
+            for (i, a) in args.iter().enumerate() {
+                pattern_conds(a, &format!("{access}._{i}"), out);
+            }
+        }
+        PatternKind::List { items, tail } => {
+            let mut cell = access.to_string();
+            for item in items {
+                out.push(format!("{cell} !== null"));
+                pattern_conds(item, &format!("{cell}.h"), out);
+                cell = format!("{cell}.t");
+            }
+            match tail {
+                None => out.push(format!("{cell} === null")),
+                Some(t) => pattern_conds(t, &cell, out),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    fn js(src: &str) -> String {
+        crate::driver::compile("t.lumo", src).unwrap()
+    }
+
+    #[test]
+    fn tail_self_call_becomes_loop() {
+        let out = js("fn loop_to(n) {\n  if n == 0 { 0 } else { loop_to(n - 1) }\n}\nfn main() { loop_to(3) }");
+        assert!(
+            out.contains("function main$loop_to($p0) {\nwhile (true) {"),
+            "{out}"
+        );
+        assert!(out.contains("continue;"), "{out}");
+    }
+
+    #[test]
+    fn non_tail_or_nested_calls_stay_calls() {
+        let out = js("fn f(n) {\n  if n == 0 { 0 } else { 1 + f(n - 1) }\n}\nfn main() { f(3) }");
+        assert!(!out.contains("while (true)"), "{out}");
+        let out = js("fn g(n) {\n  let h = fn() { g(n) }\n  h()\n}\nfn main() { 1 }");
+        assert!(!out.contains("while (true)"), "{out}");
+        // самовызов в `let` внутри match (IIFE) — не хвостовой
+        let out = js(
+            "fn f(n) {\n  let x = match n {\n    0 -> 0\n    _ -> f(n - 1)\n  }\n  x\n}\nfn main() { f(3) }",
+        );
+        assert!(!out.contains("while (true)"), "{out}");
     }
 }

@@ -26,6 +26,7 @@ fn walk<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, out: &mut HashSet<String>) {
         | ExprKind::Float(_)
         | ExprKind::Str(_)
         | ExprKind::Bool(_)
+        | ExprKind::Ctor(_)
         | ExprKind::ModuleAccess { .. } => {}
         ExprKind::Unary { expr, .. } => walk(expr, bound, out),
         ExprKind::Binary { lhs, rhs, .. } => {
@@ -55,14 +56,36 @@ fn walk<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, out: &mut HashSet<String>) {
                 walk(e, bound, out);
             }
         }
+        ExprKind::List { items, tail } => {
+            for i in items {
+                walk(i, bound, out);
+            }
+            if let Some(t) = tail {
+                walk(t, bound, out);
+            }
+        }
+        ExprKind::Tuple(items) => {
+            for i in items {
+                walk(i, bound, out);
+            }
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            walk(scrutinee, bound, out);
+            for arm in arms {
+                let base = bound.len();
+                bound.extend(arm.pattern.bindings().into_iter().map(|(n, _)| n));
+                walk(&arm.body, bound, out);
+                bound.truncate(base);
+            }
+        }
         ExprKind::Block(stmts) => {
             let base = bound.len();
             for s in stmts {
                 match s {
                     // имя `let` виден только следующим инструкциям, не собственному значению
-                    Stmt::Let { name, value, .. } => {
+                    Stmt::Let { pattern, value, .. } => {
                         walk(value, bound, out);
-                        bound.push(name.as_str());
+                        bound.extend(pattern.bindings().into_iter().map(|(n, _)| n));
                     }
                     Stmt::Expr(e) => walk(e, bound, out),
                 }
@@ -177,6 +200,15 @@ mod tests {
     }
 
     #[test]
+    fn let_pattern_binds_names() {
+        let e = parse_expr(lex("{\n let #(f, g) = #(h, 1)\n f(g)\n}").unwrap()).unwrap();
+        let mut names = HashSet::new();
+        referenced_names(&e, &mut names);
+        let names: Vec<_> = names.into_iter().collect();
+        assert_eq!(names, vec!["h".to_string()]);
+    }
+
+    #[test]
     fn fn_params_are_bound() {
         let e = parse_expr(lex("f(x)").unwrap()).unwrap();
         let params = vec![Param {
@@ -215,5 +247,15 @@ mod tests {
     fn mutual_recursion_is_one_component() {
         assert_eq!(scc(&[vec![1], vec![0], vec![]]), vec![vec![0, 1], vec![2]]);
         assert_eq!(scc(&[vec![0]]), vec![vec![0]]);
+    }
+
+    #[test]
+    fn match_arm_binds_names() {
+        let e = parse_expr(lex("match o {\n Some(f) -> f(g)\n None -> h\n}").unwrap()).unwrap();
+        let mut names = HashSet::new();
+        referenced_names(&e, &mut names);
+        let mut names: Vec<_> = names.into_iter().collect();
+        names.sort();
+        assert_eq!(names, vec!["g", "h", "o"]);
     }
 }

@@ -9,6 +9,7 @@ pub struct Module {
 pub enum Item {
     Fn(FnDecl),
     External(ExternalDecl),
+    Type(TypeDecl),
 }
 
 impl Item {
@@ -16,8 +17,25 @@ impl Item {
         match self {
             Item::Fn(f) => &f.name,
             Item::External(e) => &e.name,
+            Item::Type(t) => &t.name,
         }
     }
+}
+
+/// `type Name(a, b) { Variant(T1, T2) ... }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeDecl {
+    pub name: String,
+    pub params: Vec<String>,
+    pub variants: Vec<Variant>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Variant {
+    pub name: String,
+    pub fields: Vec<TypeExpr>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,6 +80,11 @@ pub enum TypeExpr {
         ret: Box<TypeExpr>,
         span: Span,
     },
+    /// `#(Int, String)`
+    Tuple {
+        elems: Vec<TypeExpr>,
+        span: Span,
+    },
 }
 
 impl TypeExpr {
@@ -69,7 +92,8 @@ impl TypeExpr {
         match self {
             TypeExpr::Named { span, .. }
             | TypeExpr::Var { span, .. }
-            | TypeExpr::Fn { span, .. } => *span,
+            | TypeExpr::Fn { span, .. }
+            | TypeExpr::Tuple { span, .. } => *span,
         }
     }
 }
@@ -82,11 +106,18 @@ pub struct Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
+    /// `[a, b]` или `[a, ..rest]`
+    List {
+        items: Vec<Expr>,
+        tail: Option<Box<Expr>>,
+    },
     Int(i64),
     Float(f64),
     Str(String),
     Bool(bool),
     Var(String),
+    /// Конструктор как значение: `Some`, `None`; `Some(1)` — вызов.
+    Ctor(String),
     /// `int.to_string`
     ModuleAccess {
         module: String,
@@ -116,12 +147,25 @@ pub enum ExprKind {
     },
     /// Значение блока — последнее выражение; пустой блок или `let` в конце дают `Unit`.
     Block(Vec<Stmt>),
+    /// `#(a, b)`
+    Tuple(Vec<Expr>),
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<Arm>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Arm {
+    pub pattern: Pattern,
+    pub body: Expr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     Let {
-        name: String,
+        pattern: Pattern,
         ty: Option<TypeExpr>,
         value: Expr,
         span: Span,
@@ -198,6 +242,68 @@ impl UnOp {
             UnOp::Neg => "-",
             UnOp::NegF => "-.",
             UnOp::Not => "!",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pattern {
+    pub kind: PatternKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PatternKind {
+    /// `_`
+    Wildcard,
+    Var(String),
+    /// `#(a, b)`
+    Tuple(Vec<Pattern>),
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+    /// `Some(x)`, `None`
+    Ctor {
+        name: String,
+        args: Vec<Pattern>,
+    },
+    /// `[a, b]`, `[a, ..rest]`, `[a, ..]`
+    List {
+        items: Vec<Pattern>,
+        tail: Option<Box<Pattern>>,
+    },
+}
+
+impl Pattern {
+    /// Имена, которые связывает образец, слева направо.
+    pub fn bindings(&self) -> Vec<(&str, Span)> {
+        let mut out = Vec::new();
+        self.collect_bindings(&mut out);
+        out
+    }
+
+    fn collect_bindings<'a>(&'a self, out: &mut Vec<(&'a str, Span)>) {
+        match &self.kind {
+            PatternKind::Wildcard
+            | PatternKind::Int(_)
+            | PatternKind::Float(_)
+            | PatternKind::Str(_)
+            | PatternKind::Bool(_) => {}
+            PatternKind::Var(name) => out.push((name, self.span)),
+            PatternKind::Tuple(items) | PatternKind::Ctor { args: items, .. } => {
+                for p in items {
+                    p.collect_bindings(out);
+                }
+            }
+            PatternKind::List { items, tail } => {
+                for p in items {
+                    p.collect_bindings(out);
+                }
+                if let Some(t) = tail {
+                    t.collect_bindings(out);
+                }
+            }
         }
     }
 }

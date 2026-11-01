@@ -1,0 +1,49 @@
+fn count(n, acc) {
+  if n == 0 { acc } else { count(n - 1, acc + 1) }
+}
+
+fn build(n, acc) {
+  if n == 0 { acc } else { build(n - 1, [n, ..acc]) }
+}
+
+fn length(xs, acc) {
+  match xs {
+    [] -> acc
+    [_, ..rest] -> length(rest, acc + 1)
+  }
+}
+
+fn closures(n, acc) {
+  if n == 0 { acc } else { closures(n - 1, [fn() { n }, ..acc]) }
+}
+
+fn call_all(fs, acc) {
+  match fs {
+    [] -> acc
+    [f, ..rest] -> call_all(rest, [f(), ..acc])
+  }
+}
+
+fn shadowed(n) {
+  let shadowed = fn(x) { x * 2 }
+  shadowed(n)
+}
+
+fn gcd(a, b) {
+  if b == 0 { a } else { gcd(b, a % b) }
+}
+
+fn apply(apply, x) {
+  apply(x)
+}
+
+fn main() {
+  print(int.to_string(count(1000000, 0)))
+  let big = build(200000, [])
+  print(int.to_string(length(big, 0)))
+  print(if big == build(200000, []) { "длинные списки равны" } else { "разные" })
+  debug(call_all(closures(3, []), []))
+  print(int.to_string(shadowed(21)))
+  print(int.to_string(gcd(1071, 462)))
+  print(int.to_string(apply(fn(n) { n + 1 }, 41)))
+}

@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{self, BinOp, Expr, ExprKind, Item, Stmt, TypeExpr, UnOp};
+use crate::ast::{self, BinOp, Expr, ExprKind, Item, Pattern, PatternKind, Stmt, TypeExpr, UnOp};
 use crate::diagnostics::{Diag, Span};
+use crate::exhaust::missing_case;
 use crate::typed;
 
 use super::deps::{free_names, scc};
-use super::env::Env;
+use super::env::{CtorInfo, Env, TypeInfo};
 use super::ty::{display, Scheme, Type};
 use super::unify::{Subst, UnifyError};
 
@@ -28,6 +29,7 @@ pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec
         let span = match item {
             Item::Fn(f) => f.span,
             Item::External(e) => e.span,
+            Item::Type(t) => t.span,
         };
         if !seen.insert(item.name()) {
             c.diags.push(Diag::error(
@@ -36,6 +38,15 @@ pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec
             ));
         }
     }
+    let type_decls: Vec<&ast::TypeDecl> = module
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Type(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    let (types, ctors) = c.declare_types(&type_decls);
     for item in &module.items {
         if let Item::External(e) = item {
             let scheme = c.external(e);
@@ -47,7 +58,7 @@ pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec
         .iter()
         .filter_map(|i| match i {
             Item::Fn(f) => Some(f),
-            Item::External(_) => None,
+            _ => None,
         })
         .collect();
     let index: HashMap<&str, usize> = fns
@@ -77,6 +88,7 @@ pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec
     let globals = module
         .items
         .iter()
+        .filter(|i| !matches!(i, Item::Type(_)))
         .map(|i| (i.name().to_string(), c.env.values[i.name()].clone()))
         .collect();
     // группы проверяются в порядке зависимостей — выдаём ошибки в порядке исходника
@@ -84,8 +96,13 @@ pub fn check_module(module: ast::Module, env: &Env) -> Result<typed::Module, Vec
     c.finish(typed::Module {
         ast: module,
         globals,
+        types,
+        ctors,
     })
 }
+
+/// Типы и конструкторы модуля в порядке объявления.
+type Declared = (Vec<(String, TypeInfo)>, Vec<(String, CtorInfo)>);
 
 struct Checker {
     env: Env,
@@ -186,6 +203,16 @@ impl Checker {
             ExprKind::Str(_) => Type::string(),
             ExprKind::Bool(_) => Type::bool(),
             ExprKind::Var(name) => self.lookup(name, e.span),
+            ExprKind::Ctor(name) => match self.env.ctors.get(name).cloned() {
+                Some(info) => self.subst.instantiate(&info.scheme, self.level),
+                None => {
+                    self.diags.push(Diag::error(
+                        e.span,
+                        format!("неизвестный конструктор `{name}`"),
+                    ));
+                    self.subst.fresh(self.level)
+                }
+            },
             ExprKind::ModuleAccess { module, name } => self.module_access(module, name, e.span),
             ExprKind::Unary { op, expr } => {
                 let expected = match op {
@@ -239,6 +266,53 @@ impl Checker {
                 }
             }
             ExprKind::Block(stmts) => self.block(stmts),
+            ExprKind::List { items, tail } => {
+                let elem = self.subst.fresh(self.level);
+                for item in items {
+                    let t = self.infer(item);
+                    self.expect(item.span, &t, &elem);
+                }
+                let list = Type::list(elem);
+                if let Some(tail) = tail {
+                    let t = self.infer(tail);
+                    self.expect(tail.span, &t, &list);
+                }
+                list
+            }
+            ExprKind::Tuple(items) => {
+                let tys = items.iter().map(|i| self.infer(i)).collect();
+                Type::tuple(tys)
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                let s = self.infer(scrutinee);
+                let result = self.subst.fresh(self.level);
+                let mut pattern_errors = false;
+                for arm in arms {
+                    let base = self.locals.len();
+                    let mut binds = Vec::new();
+                    let before = self.diags.len();
+                    self.bind_pattern(&arm.pattern, &s, &mut binds);
+                    pattern_errors |= self.diags.len() > before;
+                    for (name, t) in binds {
+                        self.locals.push((name, Scheme::mono(t)));
+                    }
+                    let t = self.infer(&arm.body);
+                    self.expect(arm.body.span, &t, &result);
+                    self.locals.truncate(base);
+                }
+                // полноту проверяем только для корректно типизированных образцов
+                if !pattern_errors {
+                    let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
+                    if let Some(case) = missing_case(&pats, &self.env) {
+                        // подсвечиваем только `match <выражение>`, а не весь многострочный блок
+                        self.diags.push(Diag::error(
+                            Span::new(e.span.start, scrutinee.span.end),
+                            format!("неполный match: не обработан случай `{case}`"),
+                        ));
+                    }
+                }
+                result
+            }
         }
     }
 
@@ -248,7 +322,7 @@ impl Checker {
         for stmt in stmts {
             last = match stmt {
                 Stmt::Let {
-                    name, ty, value, ..
+                    pattern, ty, value, ..
                 } => {
                     self.level += 1;
                     let actual = self.infer(value);
@@ -261,9 +335,27 @@ impl Checker {
                         }
                         None => actual,
                     };
+                    let mut binds = Vec::new();
+                    let before = self.diags.len();
+                    self.bind_pattern(pattern, &bound, &mut binds);
+                    if self.diags.len() == before {
+                        if let Some(case) = missing_case(&[pattern], &self.env) {
+                            self.diags.push(
+                                Diag::error(
+                                    pattern.span,
+                                    format!(
+                                        "образец в let должен подходить под любое значение; не подходит `{case}`"
+                                    ),
+                                )
+                                .with_hint("для разбора вариантов используй match"),
+                            );
+                        }
+                    }
                     self.level -= 1;
-                    let scheme = self.subst.generalize(&bound, self.level);
-                    self.locals.push((name.clone(), scheme));
+                    for (name, t) in binds {
+                        let scheme = self.subst.generalize(&t, self.level);
+                        self.locals.push((name, scheme));
+                    }
                     Type::unit()
                 }
                 Stmt::Expr(e) => self.infer(e),
@@ -381,22 +473,138 @@ impl Checker {
         }
     }
 
+    /// Регистрирует типы модуля (сначала имена — ради рекурсивных типов), затем конструкторы.
+    fn declare_types(&mut self, decls: &[&ast::TypeDecl]) -> Declared {
+        // имена, пришедшие из окружения (prelude): модуль не вправе их переопределять
+        let incoming_types: HashSet<String> = self.env.types.keys().cloned().collect();
+        let incoming_ctors: HashSet<String> = self.env.ctors.keys().cloned().collect();
+        let mut rejected: HashSet<&str> = HashSet::new();
+        let mut types = Vec::new();
+        for d in decls {
+            if builtin_arity(&d.name).is_some() {
+                self.diags.push(Diag::error(
+                    d.span,
+                    format!("тип `{}` уже встроен в язык", d.name),
+                ));
+                continue;
+            }
+            if incoming_types.contains(&d.name) {
+                self.diags.push(Diag::error(
+                    d.span,
+                    format!("тип `{}` уже объявлен в prelude", d.name),
+                ));
+                rejected.insert(&d.name);
+                continue;
+            }
+            let info = TypeInfo {
+                arity: d.params.len(),
+                ctors: d.variants.iter().map(|v| v.name.clone()).collect(),
+            };
+            self.env.types.insert(d.name.clone(), info.clone());
+            types.push((d.name.clone(), info));
+        }
+        let mut ctors = Vec::new();
+        let mut seen = HashSet::new();
+        for d in decls {
+            if builtin_arity(&d.name).is_some() || rejected.contains(d.name.as_str()) {
+                continue;
+            }
+            self.level = 1;
+            let mut params: HashMap<String, Type> = HashMap::new();
+            for p in &d.params {
+                if params.contains_key(p) {
+                    self.diags.push(Diag::error(
+                        d.span,
+                        format!("параметр типа `{p}` объявлен дважды"),
+                    ));
+                }
+                let v = self.subst.fresh(1);
+                params.insert(p.clone(), v);
+            }
+            let result = Type::Con(
+                d.name.clone(),
+                d.params.iter().map(|p| params[p].clone()).collect(),
+            );
+            for v in &d.variants {
+                if !seen.insert(v.name.clone()) {
+                    self.diags.push(Diag::error(
+                        v.span,
+                        format!("конструктор `{}` уже объявлен в этом модуле", v.name),
+                    ));
+                }
+                if incoming_ctors.contains(&v.name) {
+                    self.diags.push(Diag::error(
+                        v.span,
+                        format!("конструктор `{}` уже объявлен в prelude", v.name),
+                    ));
+                    continue;
+                }
+                let fields: Vec<Type> = v
+                    .fields
+                    .iter()
+                    .map(|f| self.convert_closed(f, &params))
+                    .collect();
+                let ty = if fields.is_empty() {
+                    result.clone()
+                } else {
+                    Type::Fn(fields.clone(), Box::new(result.clone()))
+                };
+                let info = CtorInfo {
+                    type_name: d.name.clone(),
+                    arity: fields.len(),
+                    scheme: self.subst.generalize(&ty, 0),
+                };
+                self.env.ctors.insert(v.name.clone(), info.clone());
+                ctors.push((v.name.clone(), info));
+            }
+            self.level = 0;
+        }
+        (types, ctors)
+    }
+
+    /// Тип поля конструктора: переменные типа — только параметры объявления.
+    fn convert_closed(&mut self, t: &TypeExpr, params: &HashMap<String, Type>) -> Type {
+        let mut vars = params.clone();
+        let ty = self.convert(t, &mut vars);
+        let mut unknown: Vec<&String> = vars.keys().filter(|n| !params.contains_key(*n)).collect();
+        unknown.sort();
+        for name in unknown {
+            self.diags.push(Diag::error(
+                t.span(),
+                format!("неизвестная переменная типа `{name}`: объяви её в параметрах типа"),
+            ));
+        }
+        ty
+    }
+
+    /// Число параметров типа или `None`, если такого типа нет.
+    fn type_arity(&self, name: &str) -> Option<usize> {
+        builtin_arity(name).or_else(|| self.env.types.get(name).map(|t| t.arity))
+    }
+
     /// Аннотация → тип. `vars` — переменные типов, видимые в объявлении.
     fn convert(&mut self, t: &TypeExpr, vars: &mut HashMap<String, Type>) -> Type {
         match t {
             TypeExpr::Named { name, args, span } => {
-                if !matches!(name.as_str(), "Int" | "Float" | "Bool" | "String" | "Unit") {
+                let Some(arity) = self.type_arity(name) else {
                     self.diags
                         .push(Diag::error(*span, format!("неизвестный тип `{name}`")));
                     return self.subst.fresh(self.level);
+                };
+                if args.len() != arity {
+                    let msg = if arity == 0 {
+                        format!("тип `{name}` не принимает параметров")
+                    } else {
+                        format!(
+                            "тип `{name}` принимает параметров: {arity}, а передано: {}",
+                            args.len()
+                        )
+                    };
+                    self.diags.push(Diag::error(*span, msg));
+                    return self.subst.fresh(self.level);
                 }
-                if !args.is_empty() {
-                    self.diags.push(Diag::error(
-                        *span,
-                        format!("тип `{name}` не принимает параметров"),
-                    ));
-                }
-                Type::con(name)
+                let args = args.iter().map(|a| self.convert(a, vars)).collect();
+                Type::Con(name.clone(), args)
             }
             TypeExpr::Var { name, .. } => {
                 let level = self.level;
@@ -408,6 +616,94 @@ impl Checker {
                 let params = params.iter().map(|p| self.convert(p, vars)).collect();
                 let ret = self.convert(ret, vars);
                 Type::Fn(params, Box::new(ret))
+            }
+            TypeExpr::Tuple { elems, .. } => {
+                let elems = elems.iter().map(|e| self.convert(e, vars)).collect();
+                Type::tuple(elems)
+            }
+        }
+    }
+
+    /// Проверяет образец против типа значения и собирает связанные имена с их типами.
+    fn bind_pattern(&mut self, p: &Pattern, expected: &Type, binds: &mut Vec<(String, Type)>) {
+        match &p.kind {
+            PatternKind::Wildcard => {}
+            PatternKind::Var(name) => {
+                if binds.iter().any(|(n, _)| n == name) {
+                    self.diags.push(Diag::error(
+                        p.span,
+                        format!("имя `{name}` повторяется в образце"),
+                    ));
+                }
+                binds.push((name.clone(), expected.clone()));
+            }
+            PatternKind::Tuple(items) => {
+                let tys: Vec<Type> = items.iter().map(|_| self.subst.fresh(self.level)).collect();
+                self.expect(p.span, &Type::tuple(tys.clone()), expected);
+                for (item, t) in items.iter().zip(&tys) {
+                    self.bind_pattern(item, t, binds);
+                }
+            }
+            PatternKind::Int(_) => {
+                self.expect(p.span, &Type::int(), expected);
+            }
+            PatternKind::Float(_) => {
+                self.expect(p.span, &Type::float(), expected);
+            }
+            PatternKind::Str(_) => {
+                self.expect(p.span, &Type::string(), expected);
+            }
+            PatternKind::Bool(_) => {
+                self.expect(p.span, &Type::bool(), expected);
+            }
+            PatternKind::List { items, tail } => {
+                let elem = self.subst.fresh(self.level);
+                let list = Type::list(elem.clone());
+                self.expect(p.span, &list, expected);
+                for item in items {
+                    self.bind_pattern(item, &elem, binds);
+                }
+                if let Some(tail) = tail {
+                    self.bind_pattern(tail, &list, binds);
+                }
+            }
+            PatternKind::Ctor { name, args } => {
+                let info = self.env.ctors.get(name).cloned();
+                let fields = match info {
+                    None => {
+                        self.diags.push(Diag::error(
+                            p.span,
+                            format!("неизвестный конструктор `{name}`"),
+                        ));
+                        None
+                    }
+                    Some(info) if info.arity != args.len() => {
+                        self.diags.push(Diag::error(
+                            p.span,
+                            format!(
+                                "конструктор `{name}` принимает аргументов: {}, а передано: {}",
+                                info.arity,
+                                args.len()
+                            ),
+                        ));
+                        None
+                    }
+                    Some(info) => {
+                        let (fields, result) =
+                            match self.subst.instantiate(&info.scheme, self.level) {
+                                Type::Fn(fields, result) => (fields, *result),
+                                other => (Vec::new(), other),
+                            };
+                        self.expect(p.span, &result, expected);
+                        Some(fields)
+                    }
+                };
+                // при ошибке имена всё равно связываем, чтобы не плодить «неизвестное имя»
+                let fields = fields
+                    .unwrap_or_else(|| args.iter().map(|_| self.subst.fresh(self.level)).collect());
+                for (a, t) in args.iter().zip(&fields) {
+                    self.bind_pattern(a, t, binds);
+                }
             }
         }
     }
@@ -442,6 +738,15 @@ impl Checker {
     }
 }
 
+/// Арность встроенного типа.
+fn builtin_arity(name: &str) -> Option<usize> {
+    match name {
+        "Int" | "Float" | "Bool" | "String" | "Unit" => Some(0),
+        "List" => Some(1),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,12 +770,40 @@ mod tests {
     }
 
     #[test]
+    fn lists() {
+        assert_eq!(t("[1, 2]"), "List(Int)");
+        assert_eq!(t("[]"), "List(a)");
+        assert_eq!(t("fn(x, xs) { [x, ..xs] }"), "fn(a, List(a)) -> List(a)");
+        assert_eq!(t("fn(xs: List(Int)) { xs }"), "fn(List(Int)) -> List(Int)");
+        assert!(err("[1, \"s\"]").contains("ожидался Int, а здесь String"));
+        assert!(err("[1, ..2]").contains("ожидался List(Int), а здесь Int"));
+        assert!(err("fn(x: List) { x }").contains("принимает параметров: 1, а передано: 0"));
+        assert!(err("fn(x: Int(Int)) { x }").contains("не принимает параметров"));
+    }
+
+    #[test]
     fn literals_and_operators() {
         assert_eq!(t("1 + 2"), "Int");
         assert_eq!(t("1.5 *. 2.0"), "Float");
         assert_eq!(t("\"a\" <> \"b\""), "String");
         assert_eq!(t("1 < 2 && true"), "Bool");
         assert_eq!(t("{}"), "Unit");
+    }
+
+    #[test]
+    fn tuples_and_destructuring() {
+        assert_eq!(t("#(1, \"s\")"), "#(Int, String)");
+        assert_eq!(t("fn(p) {\n let #(a, b) = p\n a\n}"), "fn(#(a, b)) -> a");
+        assert_eq!(
+            t("{\n let #(f, n) = #(fn(x) { x }, 1)\n let s = f(\"s\")\n f(n)\n}"),
+            "Int"
+        );
+        assert_eq!(
+            t("fn(p: #(Int, Bool)) { p }"),
+            "fn(#(Int, Bool)) -> #(Int, Bool)"
+        );
+        assert!(err("{\n let #(a, b) = 1\n a\n}").contains("ожидался Int, а здесь #(a, b)"));
+        assert!(err("{\n let #(a, a) = #(1, 2)\n a\n}").contains("имя `a` повторяется в образце"));
     }
 
     #[test]
@@ -691,5 +1024,126 @@ mod tests {
         );
         let m = check_src("fn print(x) { x }\nfn f() { print(1) }", &env).unwrap();
         assert_eq!(sig(&m, "f"), "fn() -> Int");
+    }
+    const OPTION: &str = "type Option(a) {\n  Some(a)\n  None\n}\n";
+
+    #[test]
+    fn algebraic_types() {
+        let m = check_src(
+            &format!(
+                "{OPTION}fn f() {{ Some(1) }}\nfn g() {{ None }}\nfn h(x: Option(Int)) {{ x }}"
+            ),
+            &Env::default(),
+        )
+        .unwrap();
+        assert_eq!(sig(&m, "f"), "fn() -> Option(Int)");
+        assert_eq!(sig(&m, "g"), "fn() -> Option(a)");
+        assert_eq!(sig(&m, "h"), "fn(Option(Int)) -> Option(Int)");
+        assert_eq!(m.types.len(), 1);
+        assert_eq!(m.ctors.len(), 2);
+        let names: Vec<&str> = m.globals.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["f", "g", "h"]);
+        let m = check_src(
+            "type Tree(a) {\n  Leaf\n  Node(Tree(a), a, Tree(a))\n}\nfn t() { Node(Leaf, 1, Leaf) }",
+            &Env::default(),
+        )
+        .unwrap();
+        assert_eq!(sig(&m, "t"), "fn() -> Tree(Int)");
+    }
+
+    #[test]
+    fn algebraic_type_errors() {
+        let e = |src: &str| {
+            check_src(src, &Env::default()).unwrap_err()[0]
+                .message
+                .clone()
+        };
+        assert!(e("type Box {\n  Box(a)\n}").contains("неизвестная переменная типа `a`"));
+        assert!(e("type Box(a) {\n  Box(a)\n}\nfn f(x: Box) { x }")
+            .contains("принимает параметров: 1, а передано: 0"));
+        assert!(e("type A {\n  X\n}\ntype B {\n  X\n}").contains("конструктор `X` уже объявлен"));
+        assert!(e("type Int {\n  I\n}").contains("уже встроен"));
+        assert!(e("type P(a, a) {\n  P(a)\n}").contains("параметр типа `a` объявлен дважды"));
+        assert!(e("fn f() { Nope }").contains("неизвестный конструктор `Nope`"));
+        assert!(e(&format!("{OPTION}fn f() {{ Some(1) == Some(\"s\") }}"))
+            .contains("несовпадение типов"));
+    }
+
+    #[test]
+    fn match_typing() {
+        let m = check_src(
+            &format!("{OPTION}fn unwrap(o, d) {{\n  match o {{\n    Some(x) -> x\n    None -> d\n  }}\n}}\nfn head(xs, d) {{\n  match xs {{\n    [x, ..] -> x\n    [] -> d\n  }}\n}}"),
+            &Env::default(),
+        )
+        .unwrap();
+        assert_eq!(sig(&m, "unwrap"), "fn(Option(a), a) -> a");
+        assert_eq!(sig(&m, "head"), "fn(List(a), a) -> a");
+        assert_eq!(
+            t("match 1 {\n 0 -> \"ноль\"\n _ -> \"другое\"\n}"),
+            "String"
+        );
+    }
+
+    #[test]
+    fn module_types_cannot_shadow_imported_ones() {
+        // окружение, в котором `Option` уже есть (как будет в prelude)
+        let m = check_src(OPTION, &Env::default()).unwrap();
+        let mut env = Env::default();
+        env.types.extend(m.types.iter().cloned());
+        env.ctors.extend(m.ctors.iter().cloned());
+        let e = |src: &str| check_src(src, &env).unwrap_err()[0].message.clone();
+        assert!(e("type Option(a) { X(a) }").contains("тип `Option` уже объявлен в prelude"));
+        assert!(
+            e("type Maybe(a) { Some(a) }").contains("конструктор `Some` уже объявлен в prelude")
+        );
+        // неконфликтующие имена по-прежнему работают
+        assert!(check_src("type Maybe(a) { Just(a) }", &env).is_ok());
+    }
+
+    #[test]
+    fn match_errors() {
+        let e = |src: &str| {
+            check_src(src, &Env::default()).unwrap_err()[0]
+                .message
+                .clone()
+        };
+        assert!(e(&format!(
+            "{OPTION}fn f(o) {{\n  match o {{\n    Some(a, b) -> a\n    _ -> 1\n  }}\n}}"
+        ))
+        .contains("принимает аргументов: 1, а передано: 2"));
+        assert!(e(&format!(
+            "{OPTION}fn f(o) {{\n  match o {{\n    Some(x) -> x\n    None -> x\n  }}\n}}"
+        ))
+        .contains("неизвестное имя `x`"));
+        assert!(
+            e("fn f() {\n  match 1 {\n    Nope -> 1\n    _ -> 2\n  }\n}")
+                .contains("неизвестный конструктор `Nope`")
+        );
+        assert!(err("match 1 {\n 1 -> \"a\"\n _ -> 2\n}").contains("ожидался String, а здесь Int"));
+        assert!(err("match 1 {\n \"s\" -> 1\n _ -> 2\n}").contains("ожидался Int, а здесь String"));
+    }
+
+    #[test]
+    fn exhaustiveness_errors() {
+        let e = |src: &str| check_src(src, &Env::default()).unwrap_err()[0].clone();
+        let d = e(&format!(
+            "{OPTION}fn f(o) {{\n  match o {{\n    Some(x) -> x\n  }}\n}}"
+        ));
+        assert!(
+            d.message
+                .contains("неполный match: не обработан случай `None`"),
+            "{d:?}"
+        );
+        let d = e("fn f(b) {\n  match b {\n    true -> 1\n  }\n}");
+        assert!(d.message.contains("`false`"));
+        let d = e(&format!("{OPTION}fn f(o) {{\n  let Some(x) = o\n  x\n}}"));
+        assert!(d
+            .message
+            .contains("образец в let должен подходить под любое значение"));
+        assert_eq!(
+            d.hint.as_deref(),
+            Some("для разбора вариантов используй match")
+        );
+        assert!(check_src("fn f(p) {\n  let #(a, _) = p\n  a\n}", &Env::default()).is_ok());
     }
 }
